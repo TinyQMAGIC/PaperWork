@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Paperwork</RootNamespace>
+    <AssemblyName>Paperwork</AssemblyName>
+    <Version>0.1.0</Version>
+
+    <!-- 只出一版：默认构建配置就是 Release。
+         以前裸 `dotnet build` 出的是 bin\Debug，而 tools/ 下所有验证脚本一律写死读某个
+         固定路径 —— 裸构建之后跑脚本，测的其实是上一次的旧 Release，且不会报错。
+         默认值改成 Release 把这个静默错配消掉。
+         命令行的 -c 是全局属性，优先级高于这里，需要临时出 Debug 时 `dotnet build -c Debug` 照旧可用。 -->
+    <Configuration>Release</Configuration>
+
+    <!-- 产物路径压平：不再套 Release\net10.0-windows\ 两级。
+         单目标框架 + 单配置下那两级目录没有信息量，只把路径拉长，
+         还逼着 tools/ 下所有验证脚本写死一长串绝对路径。
+
+         压平之后 Debug 和 Release 会撞进同一个目录，所以按配置分开收：
+             Release / 其它  ->  bin\              （扁平，脚本读的就是这里）
+             Debug          ->  bin\debug\
+         这样临时出过 Debug 之后，bin\ 里的 Release 产物不会被悄悄替换掉。
+
+         注意：这里用的是 Condition 而不是再写一个 PropertyGroup，
+         因为 Configuration 可能由命令行的 -c 以全局属性传入，必须按运行时取值判断。 -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath Condition="'$(Configuration)' == 'Debug'">$(MSBuildProjectDirectory)\bin\debug\</OutputPath>
+    <OutputPath Condition="'$(Configuration)' != 'Debug'">$(MSBuildProjectDirectory)\bin\</OutputPath>
+
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+
+    <Nullable>enable</Nullable>
+    <!-- 必须关：UseWindowsForms=true 会把 System.Windows.Forms 塞进隐式 using，
+         于是 DragEventArgs / DragEventHandler / Application 全部和 WPF 的二义。 -->
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 产物 exe 的图标：资源管理器 / 任务栏 / Alt+Tab 都读这一份 -->
+    <ApplicationIcon>Assets\Paperwork.ico</ApplicationIcon>
+
+    <!-- 只出 x64：互操作签名按 64 位写，x86/ARM64 需要额外的 GetWindowLong 回退分支 -->
+    <PlatformTarget>x64</PlatformTarget>
+
+    <!-- 启动性能：M0 先开分层 PGO，ReadyToRun 留到 M5 发布时再权衡体积 -->
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <!-- 用 latest 而不是 latest-recommended：后者会因大量风格类 CA 规则把 M0 的构建堵死，
+         等 M1 有测试兜底后再收紧。 -->
+    <AnalysisLevel>latest</AnalysisLevel>
+
+    <!-- WFO0003：WinForms 的分析器要求把 DPI 设置从 app.manifest 挪到 ApplicationHighDpiMode。
+         但那是 WinForms 自己的运行时开关，我们不调用 Application.SetHighDpiMode（也没有 WinForms
+         消息循环），WPF 的 PerMonitorV2 必须从 manifest 读。所以保留 manifest 写法，显式豁免。 -->
+    <NoWarn>WFO0003;$(NoWarn)</NoWarn>
+  </PropertyGroup>
+
+  <!-- D14：绝不允许以管理员身份运行，UIPI 会阻断来自 Explorer 的拖放 -->
+  <PropertyGroup>
+    <ApplicationRequireAdministrator>false</ApplicationRequireAdministrator>
+  </PropertyGroup>
+
+  <!-- 托盘要一个真实的 Icon 对象，而 ApplicationIcon 只是塞进 exe 资源段、取不到句柄。
+       同一份 ico 再嵌一次 managed resource，换掉「输出目录多一个散文件」的代价。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\Paperwork.ico" />
+  </ItemGroup>
+
+</Project>

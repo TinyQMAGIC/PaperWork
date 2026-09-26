@@ -1,0 +1,124 @@
+<Application x:Class="Paperwork.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+  <!-- 没有 StartupUri：启动顺序由 App.OnStartup 全权控制（单实例 → 建窗但不显示 → 托盘 → 热键）。
+       ShutdownMode=OnExplicitShutdown 是关键——窗口 Hide 之后进程必须活着，否则托盘一起没了。 -->
+
+  <!-- 应用级调色板。Themes/Palette.Apply 会在启动时按 state.json 里的设置整体覆盖这些键，
+       界面一律用 DynamicResource 引用，所以换主题不需要重建视觉树。
+       这里的默认值是「森林绿 + 象牙纸」，只在 Apply 之前短暂生效。 -->
+  <Application.Resources>
+    <!-- 焦点框全清。按 Alt 时 Windows 会广播 WM_UPDATEUISTATE，WPF 据此打开
+         ShowFocusVisual，给当前有键盘焦点的元素套上默认 FocusVisualStyle——
+         那东西是一条黑色虚线矩形，在纸张界面上非常扎眼。
+         默认值取自系统资源 SystemParameters.FocusVisualStyleKey，在应用级覆盖它就能全局生效；
+         逐个控件设 FocusVisualStyle="{x:Null}" 不行——WPF 的隐式样式 TargetType="Control"
+         不匹配派生类型，得按 Button/TextBox/…写一遍，漏一个就复发。
+         代价：键盘用户看不到焦点在哪（本项目没有 Tab 导航场景）。 -->
+    <Style x:Key="{x:Static SystemParameters.FocusVisualStyleKey}" TargetType="Control">
+      <Setter Property="Control.Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Control"/>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <SolidColorBrush x:Key="Paper"      Color="#F4EFE3"/>
+    <SolidColorBrush x:Key="Paper2"     Color="#EDE6D6"/>
+    <SolidColorBrush x:Key="Edge"       Color="#DCCFB4"/>
+    <SolidColorBrush x:Key="Rule"       Color="#DED6C4"/>
+    <SolidColorBrush x:Key="Ink"        Color="#2B2A26"/>
+    <SolidColorBrush x:Key="Ink2"       Color="#6E6A5F"/>
+    <SolidColorBrush x:Key="Ink3"       Color="#A29C8D"/>
+    <SolidColorBrush x:Key="Accent"       Color="#2F6B4F"/>
+    <SolidColorBrush x:Key="AccentStrong" Color="#245640"/>
+    <SolidColorBrush x:Key="AccentSoft"   Color="#1F2F6B4F"/>
+    <SolidColorBrush x:Key="AccentLine"   Color="#572F6B4F"/>
+    <SolidColorBrush x:Key="AccentOn"   Color="#F6F2E8"/>
+    <SolidColorBrush x:Key="Danger"     Color="#B8402E"/>
+    <SolidColorBrush x:Key="DangerSoft" Color="#21B8402E"/>
+    <!-- 右下角伸缩提示的描边。Palette.Apply 会按纸张覆盖它：浅色纸 = Edge 的 80%，
+         夜空纸提到 Ink3（那套 Edge 对纸底只有 1.4:1，几乎看不见）。 -->
+    <SolidColorBrush x:Key="GripLine" Color="#CCDCCFB4"/>
+    <sys:Double x:Key="GrainOpacity" xmlns:sys="clr-namespace:System;assembly=System.Runtime">0.05</sys:Double>
+
+    <!-- 唯一的圆角值：面板外壳和右键菜单都用它，改一处两边一起动 -->
+    <CornerRadius x:Key="PanelRadius">22</CornerRadius>
+
+
+    <!-- ============ 右键菜单：纸张化 ============
+         WPF 默认的 ContextMenu 是系统灰白色，跟纸质面板放一起非常突兀。
+         这里重做模板：纸张底 + 细边 + 圆角，悬停用主题色淡底。
+         两个条目样式都带 x:Key、由 PanelWindow.BuildMenu 逐个显式套上，
+         不走 ContextMenu.ItemContainerStyle——那条路会把 MenuItem 的样式也套到
+         Separator 上，直接抛 InvalidOperationException（见 README 踩坑合集）。 -->
+    <Style x:Key="PaperMenuItem" TargetType="MenuItem">
+      <Setter Property="Foreground" Value="{DynamicResource Ink}"/>
+      <Setter Property="Padding" Value="9,6,9,6"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="MenuItem">
+            <Border x:Name="bg" Background="Transparent" CornerRadius="8"
+                    Padding="{TemplateBinding Padding}">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <ContentPresenter Grid.Column="0" ContentSource="Header" VerticalAlignment="Center"
+                                  RecognizesAccessKey="True"/>
+                <TextBlock x:Name="mark" Grid.Column="1" Text="&#xE765;" FontSize="10"
+                           FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                           Margin="12,0,0,0" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Ink3}" Visibility="Collapsed"/>
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="bg" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+              </Trigger>
+              <Trigger Property="Role" Value="SubmenuHeader">
+                <Setter TargetName="mark" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="mark" Property="Text" Value="&#xE76C;"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="PaperSeparator" TargetType="Separator">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Separator">
+            <Border Height="1" Margin="7,5,7,5" Background="{DynamicResource Rule}"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="PaperContextMenu" TargetType="ContextMenu">
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="OverridesDefaultStyle" Value="True"/>
+      <Setter Property="MinWidth" Value="200"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ContextMenu">
+            <!-- 不加 DropShadowEffect：效果的位图是矩形的，会在圆角外面糊出一块直角暗角。
+                 面板本身也没有投影（D21 走分层窗口后就没有 DWM 影子），菜单跟着保持平的。 -->
+            <Border Background="{DynamicResource Paper}" BorderBrush="{DynamicResource Edge}"
+                    BorderThickness="1" CornerRadius="{StaticResource PanelRadius}" Padding="5"
+                    SnapsToDevicePixels="True">
+              <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Application.Resources>
+</Application>

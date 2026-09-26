@@ -1,0 +1,1253 @@
+<Window x:Class="Paperwork.Shell.PanelWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:data="clr-namespace:Paperwork.Data"
+        xmlns:shell="clr-namespace:Paperwork.Shell"
+        Title="Paperwork"
+        Width="524" Height="374"
+        MinWidth="320" MinHeight="240"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        AllowsTransparency="True"
+        ShowInTaskbar="False"
+        Topmost="True"
+        WindowStartupLocation="Manual"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        Background="Transparent"
+        TextOptions.TextFormattingMode="Display"
+        FontFamily="Segoe UI Variable Text, Segoe UI, Microsoft YaHei"
+        FontSize="12">
+
+  <Window.Resources>
+    <BooleanToVisibilityConverter x:Key="BoolVis"/>
+
+    <!-- 调色板本身在 App.xaml 的应用级资源里，由 Themes/Palette.Apply 覆盖。
+         这里只放非颜色的常量，避免窗口级资源把动态主题挡住。
+         圆角 PanelRadius 也放在应用级——右键菜单要用同一个值。 -->
+    <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Segoe UI Mono</FontFamily>
+    <FontFamily x:Key="BookFont">Iowan Old Style, Palatino Linotype, Georgia, Segoe UI</FontFamily>
+
+    <!-- 滚动条按 ui-mock.html 的 .scroll::-webkit-scrollbar 来：7px 宽、无轨道底色、
+         无上下箭头；滑块左右各让 1px 纸色（净宽 5px）的胶囊，悬停换 AccentLine。
+         3px 那版太细，用户点名加宽到 5。隐式样式，所以首页磁贴区和设置页一起换掉。 -->
+    <Style x:Key="PaperThumb" TargetType="Thumb">
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Background" Value="{DynamicResource Rule}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Thumb">
+            <!-- 颜色由 ScrollBar 的悬停触发器改 Thumb.Background，这里只跟随。
+                 悬停判定不放在 Thumb 上：实测 Thumb 自己的 IsMouseOver 触发器不生效
+                 （拖得动、色也对，就是不变），而挂在 ScrollBar 上还能把命中目标
+                 从 3px 放宽到整条 7px。 -->
+            <Border Margin="1,0" CornerRadius="2.5" Background="{TemplateBinding Background}"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="PaperPageButton" TargetType="RepeatButton">
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="IsTabStop" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="Transparent"/>
+      <!-- 光设 Width 没用：ScrollViewer 模板在 PART_VerticalScrollBar 上直接绑了
+           SystemParameters.VerticalScrollBarWidth(17)，模板里的本地值压过 Style 的 Setter。
+           Min/MaxWidth 模板没碰，夹住它就真的只有 7px。
+           宽度只在匹配方向的 Trigger 里夹，不做跨方向复位——复位要写 MaxWidth="None"，
+           而 LengthConverter 只认 "Auto" 不认 "None"，会在样式实例化时抛 FormatException，
+           异常被调度器兜住后整个隐式样式静默失效，退回系统默认滚动条（查 error.log 才发现）。 -->
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="{TemplateBinding Background}">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.Thumb>
+                  <Thumb x:Name="PaperThumbEl" Style="{StaticResource PaperThumb}"/>
+                </Track.Thumb>
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Style="{StaticResource PaperPageButton}" Command="ScrollBar.PageUpCommand"/>
+                </Track.DecreaseRepeatButton>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Style="{StaticResource PaperPageButton}" Command="ScrollBar.PageDownCommand"/>
+                </Track.IncreaseRepeatButton>
+              </Track>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="PaperThumbEl" Property="Background" Value="{DynamicResource AccentLine}"/>
+              </Trigger>
+              <Trigger Property="Orientation" Value="Vertical">
+                <Setter Property="Width" Value="7"/>
+                <Setter Property="MinWidth" Value="7"/>
+                <Setter Property="MaxWidth" Value="7"/>
+              </Trigger>
+              <Trigger Property="Orientation" Value="Horizontal">
+                <Setter Property="Height" Value="7"/>
+                <Setter Property="MinHeight" Value="7"/>
+                <Setter Property="MaxHeight" Value="7"/>
+                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="IconButton" TargetType="Button">
+      <Setter Property="Width" Value="26"/>
+      <Setter Property="Height" Value="26"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Foreground" Value="{DynamicResource Ink2}"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <!-- 焦点框必须在这里再压一次。App.xaml 那个全局覆盖（替换 SystemParameters.FocusVisualStyleKey）
+           盖不住所有路径：点完 ✕ 之后按 Alt，WPF 仍会给有键盘焦点的元素套上那条虚线矩形。
+           这里直接把 FocusVisualStyle 置空，从根上掐掉 —— 三枚图标钮（设置 / 收起 / 设置页退出）共用这个样式。 -->
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bg" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bg" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                <Setter TargetName="bg" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+                <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="CrumbButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource Ink3}"/>
+      <Setter Property="FontFamily" Value="{StaticResource BookFont}"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border Background="Transparent"><ContentPresenter VerticalAlignment="Center"/></Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- ============================ 备忘录 ============================
+         规格见 design/memo-mock.html ⑤。几条要点：
+         · 横条卡片 = 标题加粗单行省略 + 内容预览 2 行截断 + 右侧时间
+         · 悬停走图标按钮同一套语言：AccentSoft 底 + AccentLine 框 + 标题转 Accent
+         · 状态只改底色与描边，不改尺寸（§0.1）
+         · 图钉只有 Pinned 才显示，由 VM 直接给 Visibility，省掉一个转换器 -->
+
+    <!-- 置顶图钉。stroke 用 1.8 而不是磁贴图形的 1.6：它是 13px 的角标，不是磁贴图形，
+         1.6 在这个尺寸下太细。 -->
+    <Style x:Key="NotePin" TargetType="Path">
+      <Setter Property="Width" Value="13"/>
+      <Setter Property="Height" Value="13"/>
+      <Setter Property="Stretch" Value="Uniform"/>
+      <Setter Property="Stroke" Value="{DynamicResource Accent}"/>
+      <Setter Property="StrokeThickness" Value="1.8"/>
+      <Setter Property="StrokeLineJoin" Value="Round"/>
+      <Setter Property="Data" Value="M 12,20.5 V 14.5  M 7.6,14.5 L 9.2,6.2 H 14.8 L 16.4,14.5 Z  M 9.9,6.2 V 4.3 H 14.1 V 6.2"/>
+    </Style>
+
+    <!-- 横条卡片：标题加粗单行省略 + 内容预览 2 行截断 + 右侧时间。
+         悬停走图标按钮同一套语言：AccentSoft 底 + AccentLine 框 + 标题转 Accent。
+         状态只改底色与描边，不改尺寸（§0.1）。
+         图钉的 Visibility 由 VM 直接给，省掉一个 BoolToVisibility 转换器。 -->
+    <Style x:Key="NoteCard" TargetType="Button">
+      <Setter Property="Background" Value="{DynamicResource Paper2}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Rule}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="12,9,12,9"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="10" Padding="{TemplateBinding Padding}">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0">
+                  <DockPanel>
+                    <Path Style="{StaticResource NotePin}" VerticalAlignment="Center" Margin="0,0,5,0"
+                          Visibility="{Binding PinVisibility}"/>
+                    <TextBlock x:Name="tt" Text="{Binding Title}" FontSize="12.5" FontWeight="SemiBold"
+                               Foreground="{DynamicResource Ink}" TextTrimming="CharacterEllipsis"/>
+                  </DockPanel>
+                  <TextBlock Text="{Binding Preview}" FontSize="11" LineHeight="16.5" Margin="0,3,0,0"
+                             Foreground="{DynamicResource Ink2}" TextWrapping="Wrap"
+                             MaxHeight="33" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+
+                <TextBlock Grid.Column="1" Text="{Binding TimeText}" FontSize="10.5" Margin="10,2,0,0"
+                           FontFamily="Cascadia Mono, Consolas, Segoe UI Mono"
+                           Foreground="{DynamicResource Ink3}"/>
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+                <Setter TargetName="tt" Property="Foreground" Value="{DynamicResource Accent}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 空态那块可点的虚线提示区（自己的样式，不复用 NoteCard：它没有内容，也不该有底色） -->
+    <Style x:Key="NoteEmpty" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+      <Setter Property="BorderThickness" Value="1.5"/>
+      <Setter Property="Padding" Value="16,24,16,24"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="14" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 输入框：标题与内容共用，只有字号/字重不同。
+         必须写 Template —— TextBox 的默认模板没有圆角可设，光改 Background/BorderBrush 得不到 10px 圆角。
+         内容框的滚动条是 PART_ContentHost 自带的 ScrollViewer，
+         因此自动套上窗口级那个隐式 ScrollBar 样式（§4.12），不用另外指定。 -->
+    <Style x:Key="NoteField" TargetType="TextBox">
+      <Setter Property="Background" Value="{DynamicResource Paper2}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Rule}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="11,8,11,8"/>
+      <Setter Property="Foreground" Value="{DynamicResource Ink}"/>
+      <Setter Property="CaretBrush" Value="{DynamicResource Ink}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="10" Padding="{TemplateBinding Padding}">
+              <ScrollViewer x:Name="PART_ContentHost"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsFocused" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 右下角 FAB：42×42 与图标格同边长、圆角 13 与磁贴同圆角 —— 同一套几何语言。
+         right 26 / bottom 40：往左挪离边远一点，同时避开设在 bottom 9–24 的右下斜线。 -->
+    <Style x:Key="NoteFab" TargetType="Button">
+      <Setter Property="Width" Value="42"/>
+      <Setter Property="Height" Value="42"/>
+      <Setter Property="Background" Value="{DynamicResource Accent}"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource AccentOn}"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="13"
+                    RenderTransformOrigin="0.5,0.5">
+              <Path Stroke="{TemplateBinding Foreground}" StrokeThickness="2" StrokeStartLineCap="Round"
+                    Stretch="Uniform" Width="20" Height="20"
+                    Data="M 12,5 V 19  M 5,12 H 19"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <!-- 位移不能用 TargetName 指向 RenderTransform 里的 TranslateTransform：
+                   它的名字注册方式和视觉树元素不同，XAML 编译器报 MC4111。
+                   改成整个替换 RenderTransform——触发器失效时会自动回落到基值（null），
+                   等价于回到 Y=0。 -->
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="{DynamicResource AccentStrong}"/>
+                <Setter TargetName="bd" Property="RenderTransform">
+                  <Setter.Value><TranslateTransform Y="-1"/></Setter.Value>
+                </Setter>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 危险按钮（删除备忘）：平时就是红字红图标，悬停给淡红底 + 红框。
+         不能复用 IconButton —— 它的模板 Border 没绑 Padding，
+         横向内容会被挤在边框上（就是"选中框太小、挤着文字"的原因）。 -->
+    <Style x:Key="NoteDangerButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Foreground" Value="{DynamicResource Danger}"/>
+      <Setter Property="Padding" Value="10,5,10,5"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bg" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bg" Property="Background" Value="{DynamicResource DangerSoft}"/>
+                <Setter TargetName="bg" Property="BorderBrush" Value="{DynamicResource Danger}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 置顶用勾选，不是药丸开关（§4.10 没定义复选框，这条要补进手册）：
+         16×16 · 圆角 4 · 框 1px Rule · 底 Paper2；勾选 = Accent 底 + AccentOn 钩。
+         悬停：整行淡强调色底 + 小方格淡强调色填充 —— 方格本身只有 16px，
+         不给点反馈的话用户不敢确定自己瞄准了没有（点歪就会落到"点空白返回"上，整页关掉）。 -->
+    <Style x:Key="NoteCheck" TargetType="CheckBox">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource Ink}"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <!-- 可点区域就是这一整条 Border：8,5 → 10,7 把上下各放宽 2px、左右各 2px。
+                 18px 的小方格配上 26px 高的热区，瞄准时很容易点偏到外面。 -->
+            <Border x:Name="row" Background="Transparent" CornerRadius="8" Padding="10,7,10,7">
+              <StackPanel Orientation="Horizontal">
+                <Border x:Name="box" Width="16" Height="16" CornerRadius="4"
+                        Background="{DynamicResource Paper2}"
+                        BorderBrush="{DynamicResource Rule}" BorderThickness="1">
+                  <Path x:Name="tick" Stretch="Uniform" Width="11" Height="11"
+                        Stroke="{DynamicResource AccentOn}" StrokeThickness="2.8"
+                        StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                        Data="M 5,12.5 L 9.5,17 L 19,7" Visibility="Collapsed"/>
+                </Border>
+                <ContentPresenter x:Name="cp" Margin="7,0,0,0" VerticalAlignment="Center"
+                                  RecognizesAccessKey="True"/>
+              </StackPanel>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="row" Property="Background" Value="{DynamicResource Paper2}"/>
+                <!-- 淡绿（= 强调色加 alpha 的 AccentSoft，默认森林绿主题）。不写死绿色：
+                     换主题色后这里必须跟着走，否则蓝主题下悬停会冒出一块绿（D15）。 -->
+                <Setter TargetName="box" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="box" Property="Background" Value="{DynamicResource Accent}"/>
+                <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+                <Setter TargetName="tick" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="cp" Property="TextBlock.Foreground" Value="{DynamicResource Accent}"/>
+                <Setter TargetName="cp" Property="TextBlock.FontWeight" Value="SemiBold"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 设置页里的可选项行。选中态由窗口的 AccentKey / PaperKey / IconKey / AnchorKey 驱动，
+         所以点一下只需要改一个字符串，界面自己会动。 -->
+    <Style x:Key="OptionRow" TargetType="Border">
+      <Setter Property="Padding" Value="10,7,10,7"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Margin" Value="0,0,0,3"/>
+    </Style>
+
+    <!-- 主题色/纸张的双色 chip（照 design/ui-mock.html 的 .swatch）：50x32 底 + 底部 9px 色带。
+         一行三片横排，不再一行一项竖排占掉大半屏。 -->
+    <Style x:Key="OptionChip" TargetType="Border">
+      <Setter Property="Padding" Value="8,6"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Margin" Value="0,0,5,0"/>
+    </Style>
+
+    <!-- 分段控件的按钮。选中态由 RefreshSettingVisuals 上色（主题色实底 + 反白字），
+         所以这里只定形状。文字色走 TextElement.Foreground（可继承），标题不要设本地 Foreground。 -->
+    <Style x:Key="SegButton" TargetType="Border">
+      <Setter Property="Padding" Value="10,4"/>
+      <Setter Property="CornerRadius" Value="6"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Margin" Value="3,0,0,0"/>
+      <Setter Property="MinWidth" Value="42"/>
+      <Setter Property="TextElement.Foreground" Value="{DynamicResource Ink2}"/>
+    </Style>
+
+    <!-- 虚拟描边：收尾磁贴与拖放占位格共用同一组规格，保证两把虚线视觉统一。
+         必须用 Rectangle —— WPF 的 Border 画不出虚线，所以之前收尾磁贴那圈其实是
+         1.5px 实线，和设计稿写的 dashed 不一致，看着突兀。
+         StrokeDashArray 的单位是「几个 StrokeThickness」：要 2.5px 段 / 2.5px 空，
+         在 1.5 描边下就是 1.67 1.67。圆角 10.25 = 图标座的 11 减半个笔宽。 -->
+    <Style x:Key="GhostRing" TargetType="Rectangle">
+      <Setter Property="Stroke" Value="{DynamicResource AccentLine}"/>
+      <Setter Property="StrokeThickness" Value="1.5"/>
+      <Setter Property="StrokeDashArray" Value="1.67 1.67"/>
+      <Setter Property="RadiusX" Value="10.25"/>
+      <Setter Property="RadiusY" Value="10.25"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="IsHitTestVisible" Value="False"/>
+    </Style>
+
+    <!-- ============================ 磁贴模板 ============================ -->
+    <DataTemplate DataType="{x:Type data:TileVm}">
+      <Border x:Name="root" Background="Transparent" CornerRadius="13" Padding="4,7,4,6"
+              ToolTip="{Binding Tip}" ToolTipService.InitialShowDelay="450">
+        <Grid HorizontalAlignment="Center">
+          <StackPanel HorizontalAlignment="Center">
+
+            <Grid HorizontalAlignment="Center"
+                  Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"
+                  Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}">
+
+              <!-- 类型图形统一走 box 内的 presetGlyph（按 Kind/扩展名从 Glyphs 分流），
+                   不再用格子外那条 5px 书签凸口：凸口会把文件夹轮廓顶出图标格，视觉上"突兀"。 -->
+
+
+              <Border x:Name="box" Margin="0,4,0,0" CornerRadius="11" BorderThickness="1"
+                      Background="{DynamicResource Paper2}" BorderBrush="{DynamicResource Rule}"
+                      SnapsToDevicePixels="True">
+                <Grid>
+                  <!-- 选中态的内环（手册 §5：inset 1.5px AccentLine）。Border 画不出"框内再一圈"，
+                       所以单独一层 Rectangle 垫在内容下面、底色上面，和 CSS 的 inset box-shadow 同位。 -->
+                  <Rectangle x:Name="selRing" Visibility="Collapsed" IsHitTestVisible="False"
+                             Margin="1" RadiusX="10" RadiusY="10"
+                             Stroke="{DynamicResource AccentLine}" StrokeThickness="1.5"/>
+                  <!-- 失效态的虚线框（§5：1px dashed Ink3）。Border 不支持虚线描边，同 selRing 垫一层。 -->
+                  <Rectangle x:Name="deadRing" Visibility="Collapsed" IsHitTestVisible="False"
+                             Margin="1" RadiusX="10" RadiusY="10"
+                             Stroke="{DynamicResource Ink3}" StrokeThickness="1" StrokeDashArray="2,2"/>
+
+                  <Image x:Name="art" Stretch="Uniform" Visibility="Collapsed"
+                         RenderOptions.BitmapScalingMode="HighQuality"
+                         Source="{Binding Icon}"
+                         Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"
+                         Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"/>
+
+                  <TextBlock x:Name="glyphText" Text="{Binding DisplayGlyph}"
+                             Visibility="{Binding HasGlyphText, Converter={StaticResource BoolVis}}"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                             FontFamily="{StaticResource MonoFont}" FontSize="10.5"
+                             Foreground="{DynamicResource Ink2}"/>
+
+                  <UniformGrid x:Name="mini" Rows="2" Columns="2" Visibility="Collapsed"
+                               Width="26" Height="26" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Border CornerRadius="4" Background="{DynamicResource AccentSoft}" BorderBrush="{DynamicResource AccentLine}" BorderThickness="1"/>
+                    <Border CornerRadius="4" Background="{DynamicResource Paper}" BorderBrush="{DynamicResource Rule}" BorderThickness="1"/>
+                    <Border CornerRadius="4" Background="{DynamicResource Paper}" BorderBrush="{DynamicResource Rule}" BorderThickness="1"/>
+                    <Border CornerRadius="4" Background="{DynamicResource AccentSoft}" BorderBrush="{DynamicResource AccentLine}" BorderThickness="1"/>
+                  </UniformGrid>
+
+                  <!-- 预设图形：按 Kind 与扩展名从 Glyphs（UI 手册 §6 的图标族）分流——
+                       普通文件/文件夹/收尾格/拖放占位**共用这一个元素**，不再各开一个。
+                       **必须画在 box 内部**：放在 box 的兄弟节点上会被 box 的底色盖住，
+                       表现成"图形糊在底板后面"（上一版就是这个错，像素统计看不出来）。
+                       **图形一律 = 图标格 × 50%**：「24 图形 + Margin 12 = 48 设计格 + Viewbox」，
+                       三档都精确一半（32→16 / 42→21 / 56→28）。旧写法 Margin=10 是 32→12 / 42→22 / 56→36，
+                       三档下从 37% 到 64% 漂移，正是"大小不统一"的来源。 -->
+                  <Viewbox Visibility="{Binding HasGlyphData, Converter={StaticResource BoolVis}}" Stretch="Uniform">
+                    <Path x:Name="presetArt" Width="24" Height="24" Margin="12" Stretch="Uniform"
+                          Stroke="{DynamicResource Ink2}" StrokeThickness="1.6"
+                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                          Data="{Binding GlyphData}"/>
+                  </Viewbox>
+                </Grid>
+              </Border>
+
+              <!-- 虚线圈在 box 之外，所以内缩和 box 完全一致（Margin 0,4,0,0），
+                   换图标档位时两者一起缩放，不会出现圈和框错半像素 -->
+              <Rectangle x:Name="ghost" Style="{StaticResource GhostRing}"
+                         Margin="0,4,0,0" Visibility="Collapsed"/>
+            </Grid>
+
+            <TextBlock x:Name="label" Text="{Binding Label}" Margin="2,6,2,0"
+                       FontSize="11" LineHeight="14" TextAlignment="Center"
+                       Foreground="{DynamicResource Ink}" TextWrapping="Wrap"
+                       MaxHeight="30" TextTrimming="CharacterEllipsis"/>
+          </StackPanel>
+
+          <Border x:Name="badge" Visibility="{Binding HasCount, Converter={StaticResource BoolVis}}"
+                  HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,3,4,0"
+                  MinWidth="15" Height="15" CornerRadius="8" Padding="4,0,4,0"
+                  Background="{DynamicResource Accent}">
+            <TextBlock Text="{Binding Count}" FontSize="9.5" FontWeight="SemiBold"
+                       Foreground="{DynamicResource AccentOn}" HorizontalAlignment="Center"
+                       VerticalAlignment="Center"/>
+          </Border>
+
+          <!-- 失效标记（§4.6/§5）：Ink3 底 + Paper 文字的 15px 圆 +「!」，与收纳角标同位但互斥
+               （组合磁贴 EntryId 为 null 不会失效，失效磁贴也不会有收纳数）。 -->
+          <Border x:Name="deadBadge" Visibility="Collapsed"
+                  HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,3,4,0"
+                  Width="15" Height="15" CornerRadius="8"
+                  Background="{DynamicResource Ink3}">
+            <TextBlock Text="!" FontSize="9.5" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Paper}" HorizontalAlignment="Center"
+                       VerticalAlignment="Center"/>
+          </Border>
+        </Grid>
+      </Border>
+
+      <DataTemplate.Triggers>
+        <!-- 悬停（手册 §5）：整格 Paper2 底 + 框转 AccentLine + 图形转 Accent。
+             放在**所有**触发器最前：类型触发器（组合/收尾/占位/真图标/文件夹）排在后面，
+             会用各自的框色盖掉这里的 AccentLine——特殊格的身份色不被悬停冲掉。
+             收尾格/占位格整体排除：它们是透明底的"非真磁贴"，整格刷 Paper2 会凭空多一块色。 -->
+        <MultiDataTrigger>
+          <MultiDataTrigger.Conditions>
+            <Condition Binding="{Binding IsMouseOver, ElementName=root}" Value="True"/>
+            <Condition Binding="{Binding IsMoreTile}" Value="False"/>
+            <Condition Binding="{Binding IsGhostTile}" Value="False"/>
+          </MultiDataTrigger.Conditions>
+          <Setter TargetName="root" Property="Background" Value="{DynamicResource Paper2}"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
+        </MultiDataTrigger>
+
+        <!-- 文件夹的类型图形排在 HasIcon **之后**，见文末那段注释 -->
+
+        <DataTrigger Binding="{Binding IsGroupTile}" Value="True">
+          <Setter TargetName="mini" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="box" Property="Background" Value="{DynamicResource Paper}"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Ink3}"/>
+        </DataTrigger>
+
+        <DataTrigger Binding="{Binding IsMoreTile}" Value="True">
+          <Setter TargetName="box" Property="Background" Value="Transparent"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+          <Setter TargetName="ghost" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="label" Property="Foreground" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="label" Property="FontWeight" Value="SemiBold"/>
+        </DataTrigger>
+
+        <!-- 收尾格悬停（§4.7）：AccentSoft 底 + 实线 Accent 框。排在 IsMoreTile 之后才能
+             把它那两条 Transparent 盖掉；整格底色仍不刷（它是"出口"，不是磁贴）。 -->
+        <MultiDataTrigger>
+          <MultiDataTrigger.Conditions>
+            <Condition Binding="{Binding IsMouseOver, ElementName=root}" Value="True"/>
+            <Condition Binding="{Binding IsMoreTile}" Value="True"/>
+          </MultiDataTrigger.Conditions>
+          <Setter TargetName="box" Property="Background" Value="{DynamicResource AccentSoft}"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+        </MultiDataTrigger>
+
+        <!-- 拖放占位格：一圈虚线 + 下箭头，不写文案（定稿要"最低打扰"）。
+             root 整块不吃命中，所以它既点不动也弹不出右键菜单，落在这格上等于
+             落在面板空白处——拖放照样收。 -->
+        <DataTrigger Binding="{Binding IsGhostTile}" Value="True">
+          <Setter TargetName="box" Property="Background" Value="Transparent"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+          <Setter TargetName="ghost" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="label" Property="Visibility" Value="Collapsed"/>
+          <Setter TargetName="root" Property="IsHitTestVisible" Value="False"/>
+        </DataTrigger>
+
+        <!-- 真实图标到达后，底框与书签凸口让位，避免"色块套图标"的双层感。
+             放在 folder/group 触发器之后，靠顺序覆盖。 -->
+        <DataTrigger Binding="{Binding HasIcon}" Value="True">
+          <Setter TargetName="art" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="box" Property="Background" Value="Transparent"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+        </DataTrigger>
+
+        <!-- 文件夹必须排在 HasIcon **之后**：文件类一律用预设图形、不抢真图标（UI 手册 §6 的替代范围）。
+             排在前面会被 HasIcon 盖掉，文件夹又退回系统图标、观感又散回去了。
+             所以这里连 art 一起压掉：文件夹永远显示 GlyphFolder。 -->
+        <DataTrigger Binding="{Binding IsFolderTile}" Value="True">
+          <Setter TargetName="art" Property="Visibility" Value="Collapsed"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="box" Property="Background" Value="{DynamicResource AccentSoft}"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+        </DataTrigger>
+
+        <DataTrigger Binding="{Binding Selected}" Value="True">
+          <Setter TargetName="root" Property="Background" Value="{DynamicResource AccentSoft}"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="selRing" Property="Visibility" Value="Visible"/>
+        </DataTrigger>
+
+        <!-- 拖拽排序：被拖的那块压暗。落点指示就是"磁贴自己在实时挪动"，
+             不再额外画竖杠——前后移动本身就是最直观的指示。 -->
+        <DataTrigger Binding="{Binding Dragging}" Value="True">
+          <Setter TargetName="root" Property="Opacity" Value="0.4"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding DropHint}" Value="True">
+          <Setter TargetName="root" Property="Background" Value="{DynamicResource AccentSoft}"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="box" Property="BorderThickness" Value="2"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
+        </DataTrigger>
+
+        <!-- 「两个图标叠到一起」：目标磁贴"鼓"起来（放大 + 粗描边）。
+             与上面的 DropHint 刻意区分——那是"并进已有组合"，这里是"新建一个组合"，
+             两者的结果完全不同，所以视觉上也不能长得一样。 -->
+        <DataTrigger Binding="{Binding MergeHint}" Value="True">
+          <Setter TargetName="root" Property="Background" Value="{DynamicResource AccentSoft}"/>
+          <Setter TargetName="root" Property="RenderTransformOrigin" Value="0.5,0.4"/>
+          <Setter TargetName="root" Property="RenderTransform">
+            <Setter.Value>
+              <ScaleTransform ScaleX="1.1" ScaleY="1.1"/>
+            </Setter.Value>
+          </Setter>
+          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+          <!-- 设计稿写 2.5，但窗口开了布局取整，2.5 会被舍入成 2——和入组落点的 2px 完全一样，
+               破的是手册 §5 硬约束②（两档落点必须分得开）。取能活过取整的最小整数 3。 -->
+          <Setter TargetName="box" Property="BorderThickness" Value="3"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
+        </DataTrigger>
+
+        <DataTrigger Binding="{Binding IsDead}" Value="True">
+          <Setter TargetName="root" Property="Opacity" Value="0.42"/>
+          <Setter TargetName="label" Property="TextDecorations" Value="Strikethrough"/>
+          <!-- 实线框让位给 deadRing 的虚线：Border 画不出虚线描边。底板保留（§5 失效行只改框与透明度） -->
+          <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+          <Setter TargetName="deadRing" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="deadBadge" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Ink3}"/>
+        </DataTrigger>
+      </DataTemplate.Triggers>
+    </DataTemplate>
+  </Window.Resources>
+
+  <WindowChrome.WindowChrome>
+    <WindowChrome CaptionHeight="46" ResizeBorderThickness="10"
+                  CornerRadius="0" GlassFrameThickness="0" UseAeroCaptionButtons="False"/>
+  </WindowChrome.WindowChrome>
+
+  <Border Background="{DynamicResource Paper}" BorderBrush="{DynamicResource Edge}"
+          BorderThickness="1" CornerRadius="{StaticResource PanelRadius}" ClipToBounds="True">
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="46"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+
+      <!-- ============ 标题栏：整条是系统拖拽区，按钮逐个豁免 ============ -->
+      <Grid Grid.Row="0" Margin="16,0,13,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <TextBlock x:Name="TitleText" Grid.Column="0" Text="Paperwork" VerticalAlignment="Center"
+                   FontFamily="{StaticResource BookFont}" FontSize="15" FontWeight="SemiBold"
+                   Foreground="{DynamicResource Ink}"/>
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
+                    WindowChrome.IsHitTestVisibleInChrome="True">
+          <!-- 备忘录入口：横版折角纸 + 两条文字线。
+               注意 Path 不继承 Foreground，必须显式绑回去，否则 IconButton 的悬停变色对它无效。
+               为什么是两条线而不是设计稿里的三条：24 单位装在 15px 里，三条的 3 单位间距
+               只剩 1.9px，配 1.6px 笔宽会糊成一坨实心块（截图里那个"太重"的效果）。
+               两条线间距 4.5 单位 ≈ 2.8px，笔宽收到 1.3，才读得出是"纸上有字"。 -->
+          <Button x:Name="MemoButton" Style="{StaticResource IconButton}" Margin="0,0,2,0" ToolTip="备忘录"
+                  WindowChrome.IsHitTestVisibleInChrome="True">
+            <Path Width="15" Height="15" Stretch="Uniform" StrokeLineJoin="Round" StrokeThickness="1.3"
+                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                  Data="M 5,3.5 H 19 V 14.5 L 14.5,19 H 5 Z  M 19,14.5 H 14.5 V 19  M 8,8.5 H 16  M 8,13 H 13"/>
+          </Button>
+
+          <!-- 齿轮改成了路径，不再是字体字形 —— 理由见 FontGlyphPath 的注释：
+               图标字体只有 Normal / Bold 两档（Medium、SemiBold 实测都回落到这两档），
+               而"比 Bold 细一点点"正好落在两档中间，字重表达不出来。
+               取成路径后粗细由 StrokeThickness 连续控制：0 = 字形自带 Normal，
+               0.30 = 字形自带 Bold 的笔画粗细，当前 0.25 就是"比 Bold 细一点点"。
+               Data 在构造函数里现场从字体取，所以形状仍与系统图标一致。
+               注意 Path 不继承 Foreground，必须显式绑回去，否则 IconButton 的悬停变色对它无效。 -->
+          <Button x:Name="SettingsButton" Style="{StaticResource IconButton}" Margin="0,0,2,0" ToolTip="设置">
+            <Path x:Name="SettingsGlyph" Width="15" Height="15" Stretch="Uniform"
+                  StrokeLineJoin="Round" StrokeThickness="0.25"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+          </Button>
+          <Button x:Name="HideButton" Style="{StaticResource IconButton}" ToolTip="收起（收进托盘）">
+            <TextBlock Text="&#xE8BB;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="13"/>
+          </Button>
+        </StackPanel>
+      </Grid>
+
+      <!-- 面包屑：有层级时替换掉标题文字。按钮逐个在代码里豁免给 WindowChrome -->
+      <ItemsControl x:Name="Crumb" Grid.Row="0" VerticalAlignment="Center" Margin="16,0,120,0">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+      </ItemsControl>
+
+      <Border Grid.Row="1" Margin="15,0,15,8" Height="30" x:Name="SearchRow"
+              Background="{DynamicResource Paper2}" BorderBrush="{DynamicResource Rule}"
+              BorderThickness="1" CornerRadius="9"
+              WindowChrome.IsHitTestVisibleInChrome="True">
+        <Grid>
+          <TextBlock x:Name="SearchHint" Text="搜索本层…" Margin="9,0,0,0" VerticalAlignment="Center"
+                     FontSize="11.5" Foreground="{DynamicResource Ink3}" IsHitTestVisible="False"/>
+          <TextBox x:Name="SearchBox" Margin="6,0,6,0" Padding="4,0,0,0" VerticalContentAlignment="Center"
+                   Background="Transparent" BorderThickness="0" FontSize="11.5"
+                   Foreground="{DynamicResource Ink}" CaretBrush="{DynamicResource Accent}"/>
+        </Grid>
+      </Border>
+
+      <Border Grid.Row="2" Height="1" Margin="16,0,16,0" Background="{DynamicResource Rule}"/>
+
+      <ScrollViewer x:Name="Scroller" Grid.Row="3" Margin="12,10,6,0"
+                    VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                    Focusable="False" Padding="0,0,4,0">
+        <!-- Control.VerticalContentAlignment 默认是 Center，不显式设 Top 会让不满一屏的磁贴整块居中 -->
+        <ItemsControl x:Name="Tiles" Focusable="False"
+                      VerticalAlignment="Top" VerticalContentAlignment="Top">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <shell:TilePanel IconSize="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"/>
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+        </ItemsControl>
+      </ScrollViewer>
+
+      <Border x:Name="EmptyHint" Grid.Row="3" Margin="16,10,16,8" Visibility="Collapsed">
+        <Grid>
+          <Rectangle Stroke="{DynamicResource Rule}" StrokeThickness="1.5"
+                     StrokeDashArray="5 4" RadiusX="14" RadiusY="14"/>
+          <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+            <TextBlock x:Name="EmptyTitle" Text="把任意文件拖进来" FontSize="12.5"
+                       HorizontalAlignment="Center" Foreground="{DynamicResource Ink2}"/>
+            <TextBlock x:Name="EmptySub" Text="程序、快捷方式、文件夹、文档、图片、压缩包…"
+                       FontSize="10.5" Margin="0,6,0,0" HorizontalAlignment="Center"
+                       Foreground="{DynamicResource Ink3}"/>
+          </StackPanel>
+        </Grid>
+      </Border>
+
+      <!-- 页叠边缘：贴右下 R 角的两道 45° 斜线（V2 方案）。
+           靠角那条 7.1px、外侧 15.6px、两者垂直间距 5.1px、整组 11.6×11.6；
+           离角远近由 Margin 控制（当前离弧约 6px），调它不会改变两条线的间距。
+           纯装饰——真正的拉伸由 WindowChrome.ResizeBorderThickness=10 负责。 -->
+      <Path Grid.Row="4" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+            Margin="0,0,8,8" Stroke="{DynamicResource GripLine}" StrokeThickness="1.4"
+            StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            IsHitTestVisible="False"
+            Data="M 6.6,11.6 L 11.6,6.6  M 0,11 L 11,0"/>
+
+      <TextBlock Grid.Row="4" x:Name="StatusText" Margin="16,6,86,10"
+                 FontSize="10.5" Foreground="{DynamicResource Ink3}"/>
+
+      <!-- ============================ 备忘录 · 列表 ============================
+           与设置页同款：覆盖层，不进 NavStack、不写 state.json 的 Nav。
+           所以 D17「两层封顶」完全不用动，重启后也不会停在备忘页。 -->
+      <Border x:Name="MemoPanel" Grid.Row="0" Grid.RowSpan="5" Background="{DynamicResource Paper}"
+              CornerRadius="{StaticResource PanelRadius}" Visibility="Collapsed">
+        <Grid>
+          <!-- 只有三行：状态栏不做成独立行，而是叠在列表那一行的底部。
+               做成独立行的话，ScrollViewer 的 margin-bottom 22 会从**那一行顶部**量起，
+               实际比 R 角多让出一个状态栏的高度 —— 滚动条就顶不到弧的起点上了。 -->
+          <Grid.RowDefinitions>
+            <RowDefinition Height="46"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <!-- 面包屑 Paperwork / Memo：与钻进组合/文件夹同一套（§2），不新造 -->
+          <Grid Grid.Row="0" Margin="16,0,13,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <Button x:Name="MemoCrumbHome" Style="{StaticResource CrumbButton}" Content="Paperwork"
+                      WindowChrome.IsHitTestVisibleInChrome="True"/>
+              <TextBlock Text="/" FontSize="11" Margin="7,0,7,0" VerticalAlignment="Center"
+                         Foreground="{DynamicResource Ink3}"/>
+              <TextBlock Text="Memo" FontFamily="{StaticResource BookFont}" FontSize="15"
+                         FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{DynamicResource Ink}"/>
+            </StackPanel>
+            <Button x:Name="MemoClose" Style="{StaticResource IconButton}" ToolTip="关闭"
+                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                    WindowChrome.IsHitTestVisibleInChrome="True">
+              <TextBlock Text="&#xE8BB;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="13"/>
+            </Button>
+          </Grid>
+
+          <Border Grid.Row="1" Height="1" Margin="16,0,16,0" Background="{DynamicResource Rule}"/>
+
+          <!-- 定位照抄设置页的 ScrollViewer：
+                 上 6 = 与发丝线的空档；右 12 = 避开 ResizeBorderThickness=10 的拉伸热区；
+                 下 22 = 圆角半径，滑块底端与弧的起点齐平，不画进 R 角。
+               padding：右 14 → 卡片右缘离滚动条约 7px；下 4 → 最后一张卡离面板底 26，
+               刚好让开状态栏文字（占 bottom 10–24），不多留空白。 -->
+          <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled" Focusable="False"
+                        Margin="0,6,12,22" Padding="16,0,14,4">
+            <StackPanel>
+              <ItemsControl x:Name="MemoList" Focusable="False">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Button Style="{StaticResource NoteCard}" Tag="{Binding Id}"
+                            HorizontalAlignment="Stretch" Margin="0,0,0,6"/>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+
+              <!-- 空态：整块可点（与右下角 FAB 等价的入口） -->
+              <Button x:Name="MemoEmpty" Style="{StaticResource NoteEmpty}" HorizontalAlignment="Stretch">
+                <StackPanel>
+                  <Border Width="42" Height="42" CornerRadius="11" Margin="0,0,0,10"
+                          HorizontalAlignment="Center" Background="{DynamicResource Paper2}"
+                          BorderBrush="{DynamicResource Rule}" BorderThickness="1">
+                    <!-- 与标题栏入口同一个形状（两条文字线），换尺寸不换笔法 -->
+                    <Path Width="21" Height="21" Stretch="Uniform" StrokeLineJoin="Round" StrokeThickness="1.6"
+                          Stroke="{DynamicResource Ink3}"
+                          Data="M 5,3.5 H 19 V 14.5 L 14.5,19 H 5 Z  M 19,14.5 H 14.5 V 19  M 8,8.5 H 16  M 8,13 H 13"/>
+                  </Border>
+                  <TextBlock Text="还没有备忘" FontSize="12.5" FontWeight="SemiBold"
+                             HorizontalAlignment="Center" Foreground="{DynamicResource Ink}"/>
+                  <TextBlock Text="点这里，或右下角的 ＋，写一条" FontSize="11" Margin="0,5,0,0"
+                             HorizontalAlignment="Center" Foreground="{DynamicResource Ink3}"/>
+                </StackPanel>
+              </Button>
+            </StackPanel>
+          </ScrollViewer>
+
+          <!-- 状态栏：叠在列表底边之上（覆盖层盖住了主面板的 StatusText，所以这里自己来一份）。
+               右 86 与主面板一样留给右下斜线。 -->
+          <TextBlock x:Name="MemoStatus" Grid.Row="2" VerticalAlignment="Bottom"
+                     Margin="16,0,86,10" FontSize="10.5" Foreground="{DynamicResource Ink3}"/>
+
+          <!-- FAB：贴面板底边定位（bottom 40 避开右下斜线的 8–20） -->
+          <Button x:Name="MemoAdd" Grid.Row="2" Style="{StaticResource NoteFab}"
+                  HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,26,40"
+                  ToolTip="新建备忘" WindowChrome.IsHitTestVisibleInChrome="True"/>
+        </Grid>
+      </Border>
+
+      <!-- ============================ 备忘录 · 编辑 ============================ -->
+      <Border x:Name="MemoEditPanel" Grid.Row="0" Grid.RowSpan="5" Background="{DynamicResource Paper}"
+              CornerRadius="{StaticResource PanelRadius}" Visibility="Collapsed">
+        <Grid>
+          <!-- 三行：状态栏不做成独立行，叠在表单那一行的底部。
+               做成独立行的话「置顶 / 删除」就永远够不到底边——它们会停在状态栏那一行的上沿，
+               下面白白空出一整条（就是"内容框太短、下面留太多"的成因）。 -->
+          <Grid.RowDefinitions>
+            <RowDefinition Height="46"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <Grid Grid.Row="0" Margin="16,0,13,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <Button x:Name="MemoEditCrumbHome" Style="{StaticResource CrumbButton}" Content="Paperwork"
+                      WindowChrome.IsHitTestVisibleInChrome="True"/>
+              <TextBlock Text="/" FontSize="11" Margin="7,0,7,0" VerticalAlignment="Center"
+                         Foreground="{DynamicResource Ink3}"/>
+              <TextBlock Text="Memo" FontFamily="{StaticResource BookFont}" FontSize="15"
+                         FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{DynamicResource Ink}"/>
+            </StackPanel>
+            <Button x:Name="MemoEditClose" Style="{StaticResource IconButton}" ToolTip="保存并返回"
+                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                    WindowChrome.IsHitTestVisibleInChrome="True">
+              <TextBlock Text="&#xE8BB;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="13"/>
+            </Button>
+          </Grid>
+
+          <Border Grid.Row="1" Height="1" Margin="16,0,16,0" Background="{DynamicResource Rule}"/>
+
+          <!-- 底部留 10：与左下角状态栏文字的底边对齐（两者都距面板底 10）。
+               原先留 32 是为了避开右下斜线装饰，但斜线在主面板的 Row 4，而本覆盖层
+               RowSpan=5 把它整个盖住了 —— 编辑页里根本看不到那两条线，这个避让是白留的，
+               代价是内容框白白矮了 52px。
+               表单区整体命名 MemoForm：点空白返回时，落在它里面的点击不算空白，
+               否则瞄准输入框时点到旁边的标签就会把整页关掉。
+
+               Background="Transparent" 是这条守卫的**必要条件**，不是装饰：
+               WPF 里 Background 为 null 的 Grid 不可命中，点它的空白处事件会直接穿透到
+               后面的 MemoEditPanel 上；而那时从 MemoEditPanel 往上走永远碰不到 MemoForm，
+               CloseEditor 的判断就只能看到"空白"，守卫形同虚设。
+               结果就是：瞄准 18px 的置顶小方格、点歪一点，整页直接关掉。 -->
+          <Grid x:Name="MemoForm" Grid.Row="2" Margin="16,2,16,10" Background="Transparent">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Text="标题" FontSize="10.5" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Ink3}" Margin="2,0,0,5"/>
+            <!-- 不要设 MaxHeight：模板里 Padding 上下各 8 + 边框 2 已经占掉 18px，
+                 13px 的字一行要 ~18px，夹到 34 就只剩 16px 给文字 —— 字被裁掉，
+                 表现为"标题栏写不进任何东西"。 -->
+            <TextBox x:Name="MemoTitle" Grid.Row="1" Style="{StaticResource NoteField}"
+                     FontSize="13" FontWeight="SemiBold" VerticalContentAlignment="Center"/>
+
+            <TextBlock Grid.Row="2" Text="内容" FontSize="10.5" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Ink3}" Margin="2,9,0,5"/>
+            <TextBox x:Name="MemoBody" Grid.Row="3" Style="{StaticResource NoteField}"
+                     FontSize="12.5" AcceptsReturn="True" TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top"
+                     MinHeight="120"/>
+
+            <!-- 置顶与删除并排靠右：状态栏文字在左，右下是斜线装饰，所以这一行只能待在右侧 -->
+            <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right"
+                        VerticalAlignment="Bottom" Margin="0,9,0,0">
+              <!-- 两个都不设 VerticalAlignment：默认 Stretch，一起撑满这一行的高度。
+                   置顶那一行的热区现在是 30px（10,7 内边距），比删除按钮的 28 高，
+                   给删除按钮设 Center 的话它的底边就会比置顶高 1px、也比状态栏高 1px。
+                   都撑满，两者的底边才和左下角状态栏文字在同一条线上。 -->
+              <CheckBox x:Name="MemoPin" Style="{StaticResource NoteCheck}" Content="置顶"
+                        Margin="0,0,10,0"/>
+              <Button x:Name="MemoDelete" Style="{StaticResource NoteDangerButton}" ToolTip="删除这条备忘">
+                <StackPanel Orientation="Horizontal">
+                  <Path Width="13" Height="13" Stretch="Uniform" StrokeLineJoin="Round" StrokeThickness="1.6"
+                        Margin="0,0,6,0"
+                        Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                        Data="M 4.5,6.5 H 19.5  M 9.5,6.5 V 4.8 H 14.5 V 6.5  M 6.5,6.5 L 7.5,19.5 H 16.5 L 17.5,6.5"/>
+                  <TextBlock Text="删除这条备忘" FontSize="11.5" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+            </StackPanel>
+          </Grid>
+
+          <!-- 叠在表单行底部，右 86 与主面板状态栏一样避开右下角那一带 -->
+          <TextBlock x:Name="MemoEditStatus" Grid.Row="2" VerticalAlignment="Bottom"
+                     Margin="16,0,86,10" FontSize="10.5" Foreground="{DynamicResource Ink3}"/>
+        </Grid>
+      </Border>
+
+      <!-- ============================ 设置页 ============================ -->
+      <Border x:Name="SettingsPanel" Grid.Row="0" Grid.RowSpan="5" Background="{DynamicResource Paper}"
+              CornerRadius="{StaticResource PanelRadius}" Visibility="Collapsed">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="46"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <Grid Grid.Row="0" Margin="16,0,13,0">
+            <!-- 标题占首页「Paperwork」那个位置，同一套字形；退出改由右上角 ✕ 和 Esc 负责 -->
+            <TextBlock Text="Settings" FontFamily="{StaticResource BookFont}" FontSize="15"
+                       FontWeight="SemiBold" VerticalAlignment="Center"
+                       Foreground="{DynamicResource Ink}"/>
+            <Button x:Name="SettingsClose" Style="{StaticResource IconButton}"
+                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                    WindowChrome.IsHitTestVisibleInChrome="True">
+              <TextBlock Text="&#xE8BB;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="13"/>
+            </Button>
+          </Grid>
+
+          <Border Grid.Row="1" Height="1" Margin="16,0,16,0" Background="{DynamicResource Rule}"/>
+
+          <!-- Margin 四个值全是给滚动条定位的，不是装饰：
+               上 13 = 滑块与上方分隔线之间的空档，顶到线就是连成一坨；
+               右 12 = 避开 WindowChrome.ResizeBorderThickness=10 的拉伸热区，贴边点下去有一半在拉窗口；
+               下 22 = 正好落在右缘直线开始变弯的地方（圆角半径），滑块底端与弧的起点齐平——
+               再往外就会穿过 22px 圆角弧画到面板外（ClipToBounds 是矩形裁剪，管不了圆角）。
+               Padding 上给 0：顶部空档由 margin 出，内容起始位置和原来差不多。 -->
+          <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled"
+                        Focusable="False" Margin="0,13,12,22" Padding="16,0,8,8">
+            <StackPanel>
+              <!-- 密度原则（UI 手册 S7）：每行只讲一件事，能合并成一行的绝不拆三行。
+                   主题色/纸张各压成一行三片、图标三档并成一行分段控件、锚点两行并成一行开关，
+                   快捷键并入「呼出与停靠」-> 13 行 6 组收成 8 行 5 组，一屏放得下不用滚。 -->
+
+              <TextBlock Text="主题色" FontSize="10.5" FontWeight="SemiBold"
+                         Foreground="{DynamicResource Ink3}" Margin="0,0,0,8"/>
+              <UniformGrid Columns="3" Margin="0,0,0,14">
+                <Border Style="{StaticResource OptionChip}" Tag="accent:forest">
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Width="50" Height="32" CornerRadius="9" Background="{DynamicResource Paper2}"
+                            BorderBrush="{DynamicResource Rule}" BorderThickness="1" Margin="0,0,9,0">
+                      <Border Height="9" VerticalAlignment="Bottom" Background="#2F6B4F"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                      <TextBlock Text="森林绿" FontSize="11.5"/>
+                      <TextBlock Text="#2F6B4F" FontFamily="{StaticResource MonoFont}" FontSize="9.5"
+                                 Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
+                            Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
+                            VerticalAlignment="Center" Visibility="Collapsed">
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                    </Border>
+                  </Grid>
+                </Border>
+                <Border Style="{StaticResource OptionChip}" Tag="accent:sky">
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Width="50" Height="32" CornerRadius="9" Background="{DynamicResource Paper2}"
+                            BorderBrush="{DynamicResource Rule}" BorderThickness="1" Margin="0,0,9,0">
+                      <Border Height="9" VerticalAlignment="Bottom" Background="#2E7BB5"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                      <TextBlock Text="天空蓝" FontSize="11.5"/>
+                      <TextBlock Text="#2E7BB5" FontFamily="{StaticResource MonoFont}" FontSize="9.5"
+                                 Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
+                            Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
+                            VerticalAlignment="Center" Visibility="Collapsed">
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                    </Border>
+                  </Grid>
+                </Border>
+                <Border Style="{StaticResource OptionChip}" Tag="accent:sunset">
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Width="50" Height="32" CornerRadius="9" Background="{DynamicResource Paper2}"
+                            BorderBrush="{DynamicResource Rule}" BorderThickness="1" Margin="0,0,9,0">
+                      <Border Height="9" VerticalAlignment="Bottom" Background="#D2762E"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                      <TextBlock Text="夕阳橙" FontSize="11.5"/>
+                      <TextBlock Text="#D2762E" FontFamily="{StaticResource MonoFont}" FontSize="9.5"
+                                 Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
+                            Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
+                            VerticalAlignment="Center" Visibility="Collapsed">
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                    </Border>
+                  </Grid>
+                </Border>
+              </UniformGrid>
+
+              <TextBlock Text="纸张" FontSize="10.5" FontWeight="SemiBold"
+                         Foreground="{DynamicResource Ink3}" Margin="0,0,0,8"/>
+              <UniformGrid Columns="3" Margin="0,0,0,14">
+                <Border Style="{StaticResource OptionChip}" Tag="paper:ivory">
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Width="50" Height="32" CornerRadius="9" Background="#F4EFE3"
+                            BorderBrush="{DynamicResource Rule}" BorderThickness="1" Margin="0,0,9,0">
+                      <Border Height="9" VerticalAlignment="Bottom" Background="#DCCFB4"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                      <TextBlock Text="象牙纸" FontSize="11.5"/>
+                      <TextBlock Text="#F4EFE3" FontFamily="{StaticResource MonoFont}" FontSize="9.5"
+                                 Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
+                            Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
+                            VerticalAlignment="Center" Visibility="Collapsed">
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                    </Border>
+                  </Grid>
+                </Border>
+                <Border Style="{StaticResource OptionChip}" Tag="paper:kraft">
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Width="50" Height="32" CornerRadius="9" Background="#E8DCC2"
+                            BorderBrush="{DynamicResource Rule}" BorderThickness="1" Margin="0,0,9,0">
+                      <Border Height="9" VerticalAlignment="Bottom" Background="#C9B48A"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                      <TextBlock Text="牛皮纸" FontSize="11.5"/>
+                      <TextBlock Text="#E8DCC2" FontFamily="{StaticResource MonoFont}" FontSize="9.5"
+                                 Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
+                            Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
+                            VerticalAlignment="Center" Visibility="Collapsed">
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                    </Border>
+                  </Grid>
+                </Border>
+                <Border Style="{StaticResource OptionChip}" Tag="paper:night">
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Width="50" Height="32" CornerRadius="9" Background="#23211D"
+                            BorderBrush="{DynamicResource Rule}" BorderThickness="1" Margin="0,0,9,0">
+                      <Border Height="9" VerticalAlignment="Bottom" Background="#3A362F"/>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                      <TextBlock Text="夜空纸" FontSize="11.5"/>
+                      <TextBlock Text="#23211D" FontFamily="{StaticResource MonoFont}" FontSize="9.5"
+                                 Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
+                            Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
+                            VerticalAlignment="Center" Visibility="Collapsed">
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                    </Border>
+                  </Grid>
+                </Border>
+              </UniformGrid>
+
+              <TextBlock Text="呼出与停靠" FontSize="10.5" FontWeight="SemiBold"
+                         Foreground="{DynamicResource Ink3}" Margin="0,0,0,7"/>
+              <Border Style="{StaticResource OptionRow}" Tag="hotkey:">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <TextBlock Grid.Column="0" Text="呼出快捷键" FontSize="12.5" VerticalAlignment="Center"/>
+                  <Border Grid.Column="1" CornerRadius="5" BorderBrush="{DynamicResource Rule}" BorderThickness="1"
+                          Padding="7,2,7,2" Background="{DynamicResource Paper2}">
+                    <TextBlock x:Name="HotkeyText" Text="Ctrl+Alt+D" FontSize="11" Foreground="{DynamicResource Ink2}"/>
+                  </Border>
+                </Grid>
+              </Border>
+
+              <!-- 锚点从「点谁选谁」两行改成一行开关：开 = 跟鼠标，关 = 记住上次位置 -->
+              <Border Style="{StaticResource OptionRow}" Tag="anchor:toggle">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="出现在鼠标所在屏幕" FontSize="12.5"/>
+                    <TextBlock Text="关闭则记住上次位置" FontSize="11" Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                  <Border Grid.Column="1" x:Name="togAnchor" Width="36" Height="20" CornerRadius="10"
+                          Background="{DynamicResource Rule}">
+                    <Ellipse x:Name="knobAnchor" Width="16" Height="16" HorizontalAlignment="Left" Margin="2,0,0,0"
+                             Fill="{DynamicResource Paper}"/>
+                  </Border>
+                </Grid>
+              </Border>
+
+              <TextBlock Text="尺寸" FontSize="10.5" FontWeight="SemiBold"
+                         Foreground="{DynamicResource Ink3}" Margin="0,14,0,7"/>
+              <Border Style="{StaticResource OptionRow}" Margin="0,0,0,3">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="图标大小" FontSize="12.5"/>
+                    <TextBlock Text="拉伸只重排列数，不改变图标尺寸" FontSize="11" Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                  <Border Grid.Column="1" Padding="3" CornerRadius="9" Background="{DynamicResource Paper2}"
+                          BorderBrush="{DynamicResource Rule}" BorderThickness="1">
+                    <StackPanel Orientation="Horizontal">
+                      <Border Style="{StaticResource SegButton}" Tag="icon:32">
+                        <StackPanel><TextBlock Text="小" FontSize="11" HorizontalAlignment="Center"/>
+                          <TextBlock Text="32" FontSize="9.5" FontFamily="{StaticResource MonoFont}" HorizontalAlignment="Center"/></StackPanel>
+                      </Border>
+                      <Border Style="{StaticResource SegButton}" Tag="icon:42">
+                        <StackPanel><TextBlock Text="中" FontSize="11" HorizontalAlignment="Center"/>
+                          <TextBlock Text="42" FontSize="9.5" FontFamily="{StaticResource MonoFont}" HorizontalAlignment="Center"/></StackPanel>
+                      </Border>
+                      <Border Style="{StaticResource SegButton}" Tag="icon:56">
+                        <StackPanel><TextBlock Text="大" FontSize="11" HorizontalAlignment="Center"/>
+                          <TextBlock Text="56" FontSize="9.5" FontFamily="{StaticResource MonoFont}" HorizontalAlignment="Center"/></StackPanel>
+                      </Border>
+                    </StackPanel>
+                  </Border>
+                </Grid>
+              </Border>
+
+              <TextBlock Text="行为" FontSize="10.5" FontWeight="SemiBold"
+                         Foreground="{DynamicResource Ink3}" Margin="0,14,0,7"/>
+              <Border Style="{StaticResource OptionRow}" Tag="flag:autorun">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="跟随系统启动" FontSize="12.5"/>
+                  </StackPanel>
+                  <Border Grid.Column="1" x:Name="togAutorun" Width="36" Height="20" CornerRadius="10"
+                          Background="{DynamicResource Rule}">
+                    <Ellipse x:Name="knobAutorun" Width="16" Height="16" HorizontalAlignment="Left" Margin="2,0,0,0"
+                             Fill="{DynamicResource Paper}"/>
+                  </Border>
+                </Grid>
+              </Border>
+
+              <Border Style="{StaticResource OptionRow}" Tag="flag:trayonclose">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="点 X 收进托盘而非退出" FontSize="12.5"/>
+                    <TextBlock Text="避免误触把整个面板关掉" FontSize="11" Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                  <Border Grid.Column="1" x:Name="togTrayOnClose" Width="36" Height="20" CornerRadius="10"
+                          Background="{DynamicResource Rule}">
+                    <Ellipse x:Name="knobTrayOnClose" Width="16" Height="16" HorizontalAlignment="Left" Margin="2,0,0,0"
+                             Fill="{DynamicResource Paper}"/>
+                  </Border>
+                </Grid>
+              </Border>
+
+              <Border Style="{StaticResource OptionRow}" Tag="flag:groupbadge">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="显示组合收纳角标" FontSize="12.5"/>
+                    <TextBlock Text="组合磁贴右上角的成员数" FontSize="11" Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                  <Border Grid.Column="1" x:Name="togGroupBadge" Width="36" Height="20" CornerRadius="10"
+                          Background="{DynamicResource Rule}">
+                    <Ellipse x:Name="knobGroupBadge" Width="16" Height="16" HorizontalAlignment="Left" Margin="2,0,0,0"
+                             Fill="{DynamicResource Paper}"/>
+                  </Border>
+                </Grid>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+      </Border>
+    </Grid>
+  </Border>
+</Window>
