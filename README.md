@@ -2,3 +2,5 @@
 
 
 * A tool for managing and organizing desktop icons and folders.
+
+- It's still in a very early stage.
