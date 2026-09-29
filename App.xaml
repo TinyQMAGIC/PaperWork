@@ -1,6 +1,7 @@
 <Application x:Class="Paperwork.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:shell="clr-namespace:Paperwork.Shell"
              ShutdownMode="OnExplicitShutdown">
   <!-- 没有 StartupUri：启动顺序由 App.OnStartup 全权控制（单实例 → 建窗但不显示 → 托盘 → 热键）。
        ShutdownMode=OnExplicitShutdown 是关键——窗口 Hide 之后进程必须活着，否则托盘一起没了。 -->
@@ -46,6 +47,42 @@
     <!-- 唯一的圆角值：面板外壳和右键菜单都用它，改一处两边一起动 -->
     <CornerRadius x:Key="PanelRadius">22</CornerRadius>
 
+    <!-- 字体常量放在应用级，不放 PanelWindow：重命名对话框是另一个 Window，
+         窗口级资源取不到——飞出那棵视觉树之外的元素根本不在它的查找范围里。 -->
+    <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Segoe UI Mono</FontFamily>
+    <FontFamily x:Key="BookFont">Iowan Old Style, Palatino Linotype, Georgia, Segoe UI</FontFamily>
+
+    <!-- ============ ToolTip：纸张化（2026-09-28）============
+         WPF 默认那个气泡是米黄底 + 纯黑直角边框，字体也不跟主题，悬停磁贴时尤其扎眼。
+         统一改成 T1：Paper2 底 + Edge 细边 + Ink 字 + 圆角 8。
+
+         两个必须这么写的理由：
+         ① 隐式样式（不设 x:Key）且必须放在 App.xaml —— ToolTip 弹出后住在自己的 Popup 里，
+            资源只能顺着应用级往下找；放在某个 Window 里它可能压根够不着。
+         ② 全部用 DynamicResource —— 六种主题组合（3 纸 × 3 色）下都要成立，
+            写死任何一个色值换主题就漏馅（D15）。
+            这也是没选"墨色反白"那版的原因：深色 tooltip 固定 Ink 底，到夜空纸上会变成
+            一条浅色白带悬在深色面板上，要额外再写一套夜间分支才能救。
+
+         和右键菜单一样不加 DropShadowEffect：效果的位图是矩形的，会在圆角外糊出直角暗角。 -->
+    <Style TargetType="ToolTip">
+      <Setter Property="OverridesDefaultStyle" Value="True"/>
+      <Setter Property="HasDropShadow" Value="False"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="Foreground" Value="{DynamicResource Ink}"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToolTip">
+            <Border Background="{DynamicResource Paper2}" BorderBrush="{DynamicResource Edge}"
+                    BorderThickness="1" CornerRadius="8" Padding="10,5,10,5" SnapsToDevicePixels="True">
+              <ContentPresenter Margin="0,1,0,0"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
 
     <!-- ============ 右键菜单：纸张化 ============
          WPF 默认的 ContextMenu 是系统灰白色，跟纸质面板放一起非常突兀。
@@ -59,26 +96,44 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="MenuItem">
-            <Border x:Name="bg" Background="Transparent" CornerRadius="8"
+            <!-- CornerRadius 由 MarkMenuEdges() 写进附加属性，模板里用普通绑定取 ——
+                 首末项的同心圆角就靠这一句（DataTrigger 那条路走不通）。 -->
+            <!-- CornerRadius / 图标 / 右侧提示都不在模板里绑定了：模板内的相对源绑定
+                 实测是 PathError（谁也不画、也不报错），改由 MenuLook.OnItemLoaded
+                 在加载完成后直接赋本地值。见 MenuLook 顶部那段说明。 -->
+            <Border x:Name="bg" Background="{TemplateBinding Background}"
                     Padding="{TemplateBinding Padding}">
+              <!-- 四列：图标 / 文字 / 右侧提示 / 子菜单箭头。
+                   图标和提示都靠附加属性 + 普通绑定（模板里的 DataTrigger 不求值，见 MenuLook 注释）。
+                   图标的描边跟着 <c>Foreground</c> 走：普通态是墨色，悬停被 Style 级 Trigger
+                   改成 Accent 时图标也一起变，不需要额外的触发器。 -->
               <Grid>
                 <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
                   <ColumnDefinition Width="*"/>
                   <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <ContentPresenter Grid.Column="0" ContentSource="Header" VerticalAlignment="Center"
+                <Path Grid.Column="0" x:Name="ico" Width="16" Height="16" Stretch="Uniform"
+                      Margin="0,0,10,0" VerticalAlignment="Center"
+                      Visibility="Collapsed"
+                      Stroke="{TemplateBinding Foreground}" StrokeThickness="1.6"
+                      StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                <ContentPresenter Grid.Column="1" ContentSource="Header" VerticalAlignment="Center"
                                   RecognizesAccessKey="True"/>
-                <TextBlock x:Name="mark" Grid.Column="1" Text="&#xE765;" FontSize="10"
+                <TextBlock x:Name="hint" Grid.Column="2" FontSize="10.5" Margin="14,0,0,0"
+                           VerticalAlignment="Center" Foreground="{DynamicResource Ink3}"
+                           FontFamily="Cascadia Mono, Consolas" TextAlignment="Right"
+                           Visibility="Collapsed"/>
+                <TextBlock x:Name="mark" Grid.Column="3" Text="&#xE765;" FontSize="10"
                            FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
                            Margin="12,0,0,0" VerticalAlignment="Center"
                            Foreground="{DynamicResource Ink3}" Visibility="Collapsed"/>
               </Grid>
             </Border>
+            <!-- 悬停与危险色都搬到 Style.Triggers 了：模板里的 DataTrigger 实测不求值
+                 （见 MenuLook 的注释与 tools/probe-menu-corner.ps1 的量测结果）。 -->
             <ControlTemplate.Triggers>
-              <Trigger Property="IsHighlighted" Value="True">
-                <Setter TargetName="bg" Property="Background" Value="{DynamicResource AccentSoft}"/>
-                <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
-              </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter Property="Opacity" Value="0.45"/>
               </Trigger>
@@ -90,6 +145,29 @@
           </ControlTemplate>
         </Setter.Value>
       </Setter>
+
+      <!-- 悬停色走 **Style 级 Trigger**（模板里的 DataTrigger 实测不生效，见 MenuLook 注释）。
+           底色通过 TemplateBinding 进模板，所以这里改的就是那个高亮块。
+           注意位置：Style.Triggers 是属性元素，只能放在所有 Setter 之后，
+           夹在 Setter 中间会报 MC3088「属性元素不能位于元素内容的中间」。 -->
+      <Style.Triggers>
+        <Trigger Property="IsHighlighted" Value="True">
+          <Setter Property="Background" Value="{DynamicResource AccentSoft}"/>
+          <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- 危险项：字常年走 Danger，悬停底走 DangerSoft。
+         独立成一支、BasedOn 上面那个，是为了不再依赖"模板里判断危险"那套不可靠的机制。 -->
+    <Style x:Key="PaperMenuItemDanger" TargetType="MenuItem" BasedOn="{StaticResource PaperMenuItem}">
+      <Setter Property="Foreground" Value="{DynamicResource Danger}"/>
+      <Style.Triggers>
+        <Trigger Property="IsHighlighted" Value="True">
+          <Setter Property="Background" Value="{DynamicResource DangerSoft}"/>
+          <Setter Property="Foreground" Value="{DynamicResource Danger}"/>
+        </Trigger>
+      </Style.Triggers>
     </Style>
 
     <Style x:Key="PaperSeparator" TargetType="Separator">
@@ -110,12 +188,72 @@
         <Setter.Value>
           <ControlTemplate TargetType="ContextMenu">
             <!-- 不加 DropShadowEffect：效果的位图是矩形的，会在圆角外面糊出一块直角暗角。
-                 面板本身也没有投影（D21 走分层窗口后就没有 DWM 影子），菜单跟着保持平的。 -->
+                 面板本身也没有投影（D21 走分层窗口后就没有 DWM 影子），菜单跟着保持平的。
+
+                 上下内边距 7（原来是 5）：条目高亮块是方块，22px 的外弧在 x=5 处的纵坐标约 8px，
+                 方块的角(5,5)直接捅出纸面。留到 7 之后，再配合条目自己的同心圆角（见下面
+                 PaperMenuItem）就完全贴着弧走了。几何与四版比稿见 design/menu-corner-proposals.html。 -->
             <Border Background="{DynamicResource Paper}" BorderBrush="{DynamicResource Edge}"
-                    BorderThickness="1" CornerRadius="{StaticResource PanelRadius}" Padding="5"
+                    BorderThickness="1" CornerRadius="{StaticResource PanelRadius}" Padding="5,7,5,7"
                     SnapsToDevicePixels="True">
               <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"/>
             </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- ============ 重命名对话框：两个按钮 ============
+         不能合成一个模板：两枚按钮的悬停色各走各的（主题色 → AccentStrong 再压一档，
+         幽灵钮 → 纸底），写死在模板里得再 branch 一次，分两支反而更直白。
+         模板不做 IsMouseOver 缩放——放了会让相邻按钮的位置跟着抖。 -->
+    <Style x:Key="DialogButtonPrimary" TargetType="Button">
+      <Setter Property="Background" Value="{DynamicResource Accent}"/>
+      <Setter Property="Foreground" Value="{DynamicResource AccentOn}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="16,6,16,6"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bg" Background="{TemplateBinding Background}" CornerRadius="8"
+                    Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bg" Property="Background" Value="{DynamicResource AccentStrong}"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bg" Property="Opacity" Value="0.86"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="DialogButtonGhost" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{DynamicResource Ink2}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="16,6,16,6"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bg" Background="Transparent" CornerRadius="8"
+                    Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bg" Property="Background" Value="{DynamicResource Paper2}"/>
+                <Setter Property="Foreground" Value="{DynamicResource Ink}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
       </Setter>

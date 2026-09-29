@@ -3,12 +3,18 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Principal;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using Paperwork.Data;
 using Paperwork.Hotkeys;
 using Paperwork.Lifecycle;
 using Paperwork.Shell;
 using Paperwork.Tray;
+
+// Native 在 Paperwork.Shell 命名空间下，托盘菜单要用它的前台窗口读写
+using Native = Paperwork.Shell.Native;
 
 namespace Paperwork;
 
@@ -59,7 +65,9 @@ public partial class App : Application
         var tray = new TrayIcon();
         _tray = tray;
         tray.ToggleRequested += (_, _) => window.Toggle();
-        tray.ExitRequested += (_, _) => ExitApp();
+        tray.MenuRequested += (_, _) => ShowTrayMenu();
+        // 退出的唯一入口是纸张菜单里那一项（菜单 → 窗口 ExitRequested → 这里）
+        window.ExitRequested += (_, _) => ExitApp();
 
         if (elevated)
             tray.Balloon("不要用管理员身份运行 Paperwork",
@@ -103,11 +111,83 @@ public partial class App : Application
 
         _instance.PublishWindowHandle(window.Handle);
 
-        Log($"started. elevated={elevated} hwnd=0x{window.Handle:x} hotkey={chosen} -> {result.Status} (win32={result.Win32Error})");
+        // 这里原来有一行 startup.log（提权状态 / hwnd / 实际键位）。M5 决定去掉：
+        // 它每次启动都写、每次呼出还要再写一行，长期运行只增不减，而真正要看的
+        // 只有"异常"和"数据没落盘"两类——那两类走 LogError。
+        // 实际生效的键位不需要日志也能拿到：上面第 98-100 行已经把它回写进
+        // state.json 的 settings.hotkey，脚本和设置页都从那儿读。
 
-        // 等启动路径走完再预热，别和冷启动抢 CPU
-        Dispatcher.BeginInvoke(new Action(window.WarmUp), DispatcherPriority.ContextIdle);
+        // 手动启动（双击 / 命令行 / 快捷方式）→ 直接把面板弹出来；
+        // 开机自启那一次 → 只留托盘。没有这个区分的话只能二选一：
+        // 要么手动双击也不弹（现状），要么每次开机脸上都糊一块面板。
+        bool manualLaunch = !HasArg(e.Args, Autorun.StartupArg);
+
+        // 兜底：旧版本写进 Run 键的值没有 --startup 标记，升级之后第一次开机就是这种情形。
+        // 判据 = "自启确实开着" + "开机后 60 秒内启动"；上面第 103 行的 Autorun.Apply 每次
+        // 启动都会把标记重写回去，所以这种兜底最多用到一次。
+        if (manualLaunch && window.AutorunPreference && Environment.TickCount64 < BootGraceMs)
+            manualLaunch = false;
+
+        // 等启动路径走完再显示，别和冷启动抢 CPU
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            // 手动启动直接弹面板——这一下同时把预热那件事做了：
+            // 真的 Show 一样会走 JIT 与首次合成，不需要再屏外 Show/Hide 一次。
+            if (manualLaunch) window.ShowPanel();
+            else window.WarmUp();
+        }), DispatcherPriority.ContextIdle);
     }
+
+    /// <summary>开机后这么久之内启动，视为开机自启（只用于旧版遗留的 Run 值没有标记那一次）。</summary>
+    private const long BootGraceMs = 60_000;
+
+    private static bool HasArg(string[] args, string name) =>
+        Array.Exists(args, a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// 托盘右键 → 弹纸张菜单。
+    ///
+    /// <b>必须设 PlacementTarget</b>：不设的话弹出层拿不到焦点，ContextMenu 的自动关闭机制
+    /// 就不工作 —— 实测打开之后 Esc 关不掉、点别处也关不掉，菜单就卡在屏幕上。
+    /// 位置仍然用鼠标点（<see cref="PlacementMode.MousePoint"/>），所以菜单出现在光标处，
+    /// 不受窗口位置影响；面板隐藏时照样弹得出来（Popup 是独立的 HWND）。
+    /// </summary>
+    private TrayMenuHost? _menuHost;
+
+    private void ShowTrayMenu()
+    {
+        var menu = _window?.BuildTrayMenu();
+        if (menu is null) return;
+
+        // 记住弹菜单之前的前台窗口，关掉之后要还回去 ——
+        // 不还的话，用户正在用的那个程序会被我们这个透明宿主抢走焦点
+        IntPtr previous = Native.GetForegroundWindow();
+
+        // 必须延到这一轮消息之后再开：右键是落在<b>托盘</b>上的，那是 explorer 的窗口，
+        // 此刻鼠标捕获还在它手里。立刻开菜单的话 Popup 拿不到捕获。
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            // 宿主用**专用的隐形窗口**，不能用面板：面板收起时它不是可见窗口，
+            // 菜单就没有可激活的宿主 —— Esc 关不掉、点别处也关不掉（实测卡死）。
+            _menuHost ??= new TrayMenuHost();
+            _menuHost.ActivateForMenu();
+
+            menu.PlacementTarget = _menuHost;
+            menu.Placement = PlacementMode.MousePoint;
+
+            menu.Closed += (_, _) =>
+            {
+                // 焦点还回去。面板自己就是前台时不用动（它本来就该接着持有焦点）
+                if (previous != IntPtr.Zero && previous != WindowHandleOf(_window))
+                    Native.SetForegroundWindow(previous);
+            };
+
+            menu.IsOpen = true;
+        }), DispatcherPriority.Background);
+    }
+
+    private static IntPtr WindowHandleOf(PanelWindow? window) =>
+        window is null ? IntPtr.Zero : new System.Windows.Interop.WindowInteropHelper(window).Handle;
 
     /// <summary>首选热键被占时的退让顺序。</summary>
     private static readonly string[] FallbackChords =
@@ -115,21 +195,33 @@ public partial class App : Application
         "Ctrl+Alt+P", "Ctrl+Alt+B", "Ctrl+Alt+M", "Ctrl+Shift+F12"
     ];
 
-    /// <summary>启动与呼出诊断日志。M0 用来排查热键注册、提权状态和呼出延迟；M5 决定去留。</summary>
-    internal static void Log(string message) =>
-        Append(Path.Combine(DataDir, "startup.log"), $"{DateTime.Now:HH:mm:ss.fff}  {message}");
-
     /// <summary>
-    /// 异常与"数据没能落盘"。后者尤其不能吞：磁盘满、杀软锁文件、APPDATA 被同步盘撞车，
+    /// 唯一的日志：异常，以及"数据没能落盘"。
+    /// 后者尤其不能吞：磁盘满、杀软锁文件、APPDATA 被同步盘撞车，
     /// 表现都是"我明明加了，重启又没了"。写失败的一侧在 StateStore.Save 里调它。
+    ///
+    /// 平时一个字节都不写——只有真出事才写。这正是 M5 定下来的取舍：
+    /// 原来那个 startup.log（每次启动 + 每次呼出各一行）已删除，它只增不减，
+    /// 而它承载的信息（实际生效的热键）state.json 里本来就有。
     /// </summary>
     internal static void LogError(string message) =>
         Append(Path.Combine(DataDir, "error.log"), $"{DateTime.Now:O}  {message}");
 
-    private static string DataDir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Paperwork");
+    /// <summary>
+    /// 自检模式 <c>--probe &lt;路径&gt;</c> 的输出。单独一个文件，是因为它**只在有人显式敲
+    /// 这个开关时**才产生，正常运行一个字节都不写——和"去掉常驻日志"不冲突。
+    /// 它原来写 startup.log，那个文件 M5 已删除；而探针没有输出就完全没有意义，
+    /// 所以给它留一条专用通道，而不是让它悄悄变哑。
+    /// </summary>
+    private static void LogProbe(string message) =>
+        Append(Path.Combine(DataDir, "probe.txt"), $"{DateTime.Now:O}  {message}");
 
-    /// <summary>日志体积上限。startup.log 每次呼出都写一行，长期运行会一直长下去。</summary>
+    // 与 state.json / window.json 同一个目录，由 AppPaths 一处决定。
+    // 日志跟着数据走，不然又变成两个地方存东西。
+    private static string DataDir => AppPaths.DataDir;
+
+    /// <summary>日志体积上限。error.log 只在异常时写、平时不动，
+    /// 但真出了反复崩溃的情况照样会涨，所以留一道轮转。</summary>
     private const long MaxLogBytes = 512 * 1024;
 
     /// <summary>每个文件本次进程是否已经轮转过。日志是慢变量，没必要每条都去问文件系统。</summary>
@@ -183,11 +275,11 @@ public partial class App : Application
         var hwnd = Native.GetShellWindow();
 
         var (ok, verbs, failure) = NativeContextMenu.Probe(path, hwnd);
-        Log($"PROBE menu  path='{path}' hwnd=0x{hwnd:x} ok={ok} verbs={verbs} fail='{failure}'");
+        LogProbe($"PROBE menu  path='{path}' hwnd=0x{hwnd:x} ok={ok} verbs={verbs} fail='{failure}'");
 
         var pending = ShellIcons.Query(path, 48);
         var image = ShellIcons.Materialize(pending) as System.Windows.Media.Imaging.BitmapSource;
-        Log($"PROBE icon  path='{path}' exists={pending.Exists} name='{pending.DisplayName}' " +
+        LogProbe($"PROBE icon  path='{path}' exists={pending.Exists} name='{pending.DisplayName}' " +
             $"size={(image is null ? "null" : $"{image.PixelWidth}x{image.PixelHeight}")} " +
             $"type='{pending.TypeName}'");
 

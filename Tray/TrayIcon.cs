@@ -18,7 +18,16 @@ internal sealed class TrayIcon : IDisposable
     private Stopwatch? _lastClick;
 
     public event EventHandler? ToggleRequested;
-    public event EventHandler? ExitRequested;
+
+    // 原来这里还有个 ExitRequested。退出改成从纸张菜单里走（菜单的「退出」→ 窗口的
+    // ExitRequested → App.ExitApp），托盘自己这条就没人订阅了 —— 删掉，别留死事件。
+
+    /// <summary>
+    /// 右键：交给外层弹<b>纸张菜单</b>。
+    /// 这里不再挂 WinForms 的 <c>ContextMenuStrip</c> —— 那是系统原生的灰白菜单，
+    /// 和纸张界面不是一个世界（字体、圆角、悬停色全都不受控）。
+    /// </summary>
+    public event EventHandler? MenuRequested;
 
     public TrayIcon()
     {
@@ -29,13 +38,16 @@ internal sealed class TrayIcon : IDisposable
             Visible = true
         };
 
-        var menu = new WF.ContextMenuStrip();
-        menu.Items.Add("呼出 / 收起", null, (_, _) => ToggleRequested?.Invoke(this, EventArgs.Empty));
-        menu.Items.Add(new WF.ToolStripSeparator());
-        menu.Items.Add("退出", null, (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty));
-        _icon.ContextMenuStrip = menu;
-
+        // 不设 ContextMenuStrip：右键收到的那一下由 OnMouseUp 转成 MenuRequested，
+        // 外层用和磁贴菜单同一套样式弹（见事件上的注释）
         _icon.MouseClick += OnMouseClick;
+        _icon.MouseUp += OnMouseUp;
+    }
+
+    private void OnMouseUp(object? sender, WF.MouseEventArgs e)
+    {
+        if (e.Button != WF.MouseButtons.Right) return;
+        MenuRequested?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
@@ -76,6 +88,7 @@ internal sealed class TrayIcon : IDisposable
     public void Dispose()
     {
         _icon.MouseClick -= OnMouseClick;
+        _icon.MouseUp -= OnMouseUp;
         _icon.Visible = false;
         _icon.Dispose();
     }
