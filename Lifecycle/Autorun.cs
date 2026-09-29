@@ -12,6 +12,15 @@ public static class Autorun
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "Paperwork";
 
+    /// <summary>
+    /// 写进 Run 键的启动标记：这一次的启动是**开机自启**，不是用户双击。
+    ///
+    /// 没有这个标记，App 就分不清两种启动方式，只能二选一：
+    /// 要么手动双击也不弹面板（现在的行为），要么每次开机脸上都糊一块面板。
+    /// 有了它，手动启动可以直接弹面板，开机那次仍然只留托盘。
+    /// </summary>
+    public const string StartupArg = "--startup";
+
     public static void Apply(bool enabled)
     {
         try
@@ -21,7 +30,10 @@ public static class Autorun
             if (key is null) return;
 
             if (enabled)
-                key.SetValue(ValueName, Quote(Environment.ProcessPath ?? "Paperwork.exe"));
+                // 带上启动标记，让 App 能把"开机自启"和"用户双击"分开处理。
+                // 顺带修一个迁移问题：旧版本写进去的值没有标记，这里每次启动都会重写，
+                // 所以升级之后最多只有一次开机是被兜底逻辑判断的。
+                key.SetValue(ValueName, Quote(Environment.ProcessPath ?? "Paperwork.exe") + " " + StartupArg);
             else if (key.GetValue(ValueName) is not null)
                 key.DeleteValue(ValueName, throwOnMissingValue: false);
         }

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using Paperwork.Data;
 
 namespace Paperwork.Lifecycle;
 
@@ -18,8 +19,7 @@ internal sealed record PanelBounds(int X, int Y, double WidthDip, double HeightD
 /// </summary>
 internal static class WindowStateStore
 {
-    private static readonly string StoreDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Paperwork");
+    private static readonly string StoreDir = AppPaths.DataDir;
 
     private static readonly string FilePath = Path.Combine(StoreDir, "window.json");
 
