@@ -148,7 +148,9 @@ public partial class PanelWindow : Window
             if (--_dragDepth <= 0) { _dragDepth = 0; SetDropGhost(false); }
         };
 
-        SearchBox.TextChanged += (_, _) => ApplyQuery();
+        // 搜索的接线全部在 InitSearch 里。初始态（点了搜索框还没打字）什么都不变：
+        // 还是当前这一层的磁贴，不跳页、不改标题。
+        InitSearch();
         SearchBox.GotKeyboardFocus += (_, _) => SearchHint.Visibility = Visibility.Collapsed;
         SearchBox.LostKeyboardFocus += (_, _) =>
             SearchHint.Visibility = string.IsNullOrEmpty(SearchBox.Text) ? Visibility.Visible : Visibility.Collapsed;
@@ -158,7 +160,6 @@ public partial class PanelWindow : Window
     private void OnWatchedFolderChanged()
     {
         if (_nav.Current.Kind != NavKind.Folder) return;
-        App.Log($"watcher fired: {_nav.Current.Path}");
         Render(animate: false);
         ScheduleIcons();
         Status("文件夹已更新");
@@ -206,6 +207,20 @@ public partial class PanelWindow : Window
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        // 双击标题栏不要最大化。
+        //
+        // 这是常驻浮窗不是普通窗口：想放大的人会去拖边框，而双击顶栏多半只是连点了两下
+        // （比如连点两次齿轮想开关设置页），结果整块面板突然铺满屏幕，非常突兀。
+        //
+        // WindowChrome 的 CaptionHeight=46 就是拖拽区，双击它会被 DefWindowProc 按
+        // "HTCAPTION 上的双击 = 最大化/还原"处理掉。这里在 WndProc 层直接吃掉：
+        // 拖拽本身不受影响——拖动走的是 WM_NCLBUTTONDOWN + WM_NCMOUSEMOVE，不是这条消息。
+        if (msg == Native.WM_NCLBUTTONDBLCLK)
+        {
+            handled = true;
+            return IntPtr.Zero;
+        }
+
         // Win11 原生菜单的 owner-draw 条目靠这四条消息画自己，消息发给 hwndOwner（就是我们）。
         // 不转发的话「资源管理器菜单」弹出来一半条目是空白。
         if (NativeContextMenu.HandleMenuMessage((uint)msg, wParam, lParam, out IntPtr menuResult))
@@ -216,6 +231,16 @@ public partial class PanelWindow : Window
 
         if ((msg == Native.WM_HOTKEY && wParam.ToInt32() == Native.HOTKEY_ID) || msg == Native.WM_SHOWTOGGLE)
         {
+            // 改键进行中收到呼出请求：这次按到的正是当前注册的那个组合 ——
+            // 它此刻的语义是"再确认一遍旧键"，不是"呼出/收起"。不拦的话面板会当场消失，
+            // 而 WPF 那侧永远等不到这颗键（它被系统吞成了 WM_HOTKEY），
+            // 结果就是"面板没了 + 呼回来还停在『按下新组合键…』"。
+            if (CommitHotkeyFromHotkeyMessage())
+            {
+                handled = true;
+                return IntPtr.Zero;
+            }
+
             ToggleRequested?.Invoke(this, EventArgs.Empty);
             handled = true;
         }
@@ -288,6 +313,11 @@ public partial class PanelWindow : Window
     /// </summary>
     private void OnEnteredFullscreen()
     {
+        // D28：开关关着就不自动收起——全屏的 IDE / 远程桌面等「工作型全屏」会被这条误伤，
+        // 用户拍板「藏不藏由我按热键决定」（与 D5 同一套哲学）。hook 照旧装着，
+        // 只在这里短路——事件驱动零开销，"装着不用"没有成本，且开关一改立即生效。
+        if (!_store.State.Settings.HideOnFullscreen) return;
+
         if (NativeContextMenu.IsLive) return;
 
         _ = Dispatcher.BeginInvoke(new Action(() =>
@@ -307,6 +337,10 @@ public partial class PanelWindow : Window
     /// </summary>
     private void OnBeforeHide()
     {
+        // 改键捕获也一样要收尾：面板都收了，捕获态留着只会在下次呼出后把点击全吃掉
+        // （面板级的守卫会把它们当成"点空白退出改键"）。见 EndHotkeyCaptureIfAny。
+        EndHotkeyCaptureIfAny();
+
         DropDragState();   // 拖拽幽灵窗口不跟着一起收掉的话，屏幕上会留一个孤儿图标
         ReleaseTileIcons();
         _icons?.Trim();
@@ -359,14 +393,9 @@ public partial class PanelWindow : Window
         if (_store.LastSaveFailure is { } fail)
             Status($"上次保存失败：{fail}（面板上的改动还没写进磁盘）");
 
-#if DEBUG
-        // 进程资源快照要走一次内核查询，调试时留着有用
-        App.Log($"show #{_probe.ShowCount + 1} last={_probe.LastMs:F1}ms :: {PerfProbe.SnapshotResource()}");
-#else
-        // Release 下这句话跑在 §13.3 那条 P95 < 30ms 的关键路径上，
-        // 资源快照只是给调试看的，省掉它。
-        App.Log($"show #{_probe.ShowCount + 1} last={_probe.LastMs:F1}ms");
-#endif
+        // 这里原来每次呼出都要写一行 startup.log（含进程资源快照）。M5 删掉了：
+        // 它跑在 §13.3 那条 P95 < 30ms 的关键路径上，而"每次呼出延迟"这种量
+        // 只在调性能时才要看，长驻写盘不值得。真要量的时候临时加回来即可。
     }
 
     /// <summary>
@@ -462,6 +491,35 @@ public partial class PanelWindow : Window
 
     private void BuildBreadcrumb()
     {
+        // 搜索态：面包屑只有 Paperwork / Search，与备忘页那套完全同构（§2），不新造。
+        // 位置就是首页标题的位置，所以从首页进搜索时左上角不会跳。
+        if (_searching)
+        {
+            TitleText.Visibility = Visibility.Collapsed;
+            Crumb.Visibility = Visibility.Visible;
+
+            var home = new Button
+            {
+                Content = "Paperwork",
+                Style = (Style)FindResource("CrumbButton")
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(home, true);
+            home.Click += (_, _) => { SearchBox.Clear(); };   // 清词即退场，与 Esc 同一条路
+
+            var leaf = new TextBlock
+            {
+                Text = "Search",
+                FontFamily = (FontFamily)FindResource("BookFont"),
+                FontSize = 15,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = (Brush)FindResource("Ink")
+            };
+
+            Crumb.ItemsSource = new object[] { home, Slash(), leaf };
+            return;
+        }
+
         var frames = _nav.Frames;
         var pieces = new List<object>(frames.Count * 2 - 1);
 
@@ -472,17 +530,7 @@ public partial class PanelWindow : Window
 
         for (int i = 0; i < frames.Count; i++)
         {
-            if (i > 0)
-            {
-                pieces.Add(new TextBlock
-                {
-                    Text = "/",
-                    FontSize = 11,
-                    Margin = new Thickness(7, 0, 7, 0),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Foreground = (Brush)FindResource("Ink3")
-                });
-            }
+            if (i > 0) pieces.Add(Slash());
 
             int index = i;
             var btn = new Button
@@ -506,16 +554,22 @@ public partial class PanelWindow : Window
         Crumb.ItemsSource = pieces;
     }
 
+    /// <summary>面包屑的斜杠。抽出来是因为搜索态也要用同一个（首页 / 备忘页都是它）。</summary>
+    private TextBlock Slash() => new()
+    {
+        Text = "/",
+        FontSize = 11,
+        Margin = new Thickness(7, 0, 7, 0),
+        VerticalAlignment = VerticalAlignment.Center,
+        Foreground = (Brush)FindResource("Ink3")
+    };
+
     private void ApplyQuery(bool animate = true)
     {
-        _query = SearchBox.Text?.Trim() ?? string.Empty;
-
-        IEnumerable<TileVm> tiles = _board.Tiles;
-        if (_query.Length > 0)
-            tiles = tiles.Where(t => t.Label.Contains(_query, StringComparison.CurrentCultureIgnoreCase));
-
-        var list = tiles.ToList();
-        foreach (var t in list) t.Highlighted = _query.Length > 0;
+        // 全局搜索上线后这里不再按查询过滤磁贴：搜索结果归 SearchPanel 那层管。
+        // 两套过滤并存的话，清空搜索框时会出现"磁贴回来了、状态栏还是搜索口径"这种
+        // 各说各话的中间态。这一层只负责把当前层原样铺出来。
+        var list = _board.Tiles.ToList();
 
         _shown.Clear();
         foreach (var t in list) _shown.Add(t);
@@ -528,17 +582,17 @@ public partial class PanelWindow : Window
             // 是在骗人——用户会以为这是个空目录，然后把自己拖进去的文件当成丢了。
             bool loading = _board.Subtitle == BoardBuilder.FolderLoadingText;
 
-            EmptyTitle.Text = _query.Length > 0
-                ? $"没有匹配「{_query}」的条目"
-                : loading ? BoardBuilder.FolderLoadingText : "把任意文件拖进来";
-            EmptySub.Text = _query.Length > 0
-                ? "只搜当前这一层，不跨组合"
-                : loading ? "稍等一下" : "程序、快捷方式、文件夹、文档、图片、压缩包…";
+            // 搜索的"没找到"不在这里说：搜索结果有自己的空态（SearchEmpty），
+            // 磁贴区的空态只负责"这一层本来就是空的"。
+            EmptyTitle.Text = loading ? BoardBuilder.FolderLoadingText : "把任意文件拖进来";
+            EmptySub.Text = loading ? "稍等一下" : "程序、快捷方式、文件夹、文档、图片、压缩包…";
         }
 
-        StatusText.Text = _query.Length > 0
-            ? $"{list.Count} / {_board.Tiles.Count} 项"
-            : _board.Subtitle;
+        StatusText.Text = _board.Subtitle;
+
+        // 搜索层背景是 Transparent（要透出右下角那两道斜线），主状态栏必须自己让位，
+        // 否则"N 项 · M 个组合"和"0 项 · Esc 返回"两行字叠在左下角（实测重叠过）。
+        StatusText.Visibility = _searching ? Visibility.Collapsed : Visibility.Visible;
 
         if (animate) PlayViewAnimation();
     }
@@ -569,14 +623,29 @@ public partial class PanelWindow : Window
 
     private static TileVm? TileFrom(object source)
     {
-        if (source is not DependencyObject node) return null;
+        // 用可空变量走循环：ParentOf 可能返回 null（到顶了），
+        // 写成非空变量编译器会报 CS8600。
+        DependencyObject? node = source as DependencyObject;
         while (node is not null)
         {
             if (node is FrameworkElement fe && fe.DataContext is TileVm vm) return vm;
-            node = VisualTreeHelper.GetParent(node);
+            node = ParentOf(node);
         }
         return null;
     }
+
+    /// <summary>
+    /// 往上一层。<see cref="VisualTreeHelper.GetParent"/> 只吃 Visual / Visual3D，喂别的会抛
+    /// <see cref="InvalidOperationException"/> —— 搜索结果行里那段高亮文案是 <c>Run</c>，
+    /// 右键点到它上面直接崩过一次（见 error.log 07:11 那条，备忘页早就为同一件事加了
+    /// <c>IsVisual</c> 守卫，这里换成通用版）。
+    ///
+    /// 不能直接"不是 Visual 就返回 null"：那样点在命中文字上就点不动结果行了，
+    /// 而高亮处恰恰是最容易点的地方。改用逻辑树往上走——<c>Run</c> 的逻辑父级是
+    /// <c>TextBlock</c>，从那儿又能接回视觉树。
+    /// </summary>
+    private static DependencyObject? ParentOf(DependencyObject node) =>
+        IsVisual(node) ? VisualTreeHelper.GetParent(node) : LogicalTreeHelper.GetParent(node);
 
     private void OnMouseUp(object sender, MouseButtonEventArgs e)
     {
@@ -585,6 +654,35 @@ public partial class PanelWindow : Window
         {
             _suppressClick = false;
             e.Handled = true;
+            return;
+        }
+
+        // 改键捕获中：点空白即取消（与 Esc 同一语义，走同一个 CancelHotkeyCapture）。
+        //
+        // 必须排在下面所有分支之前 —— 设置页里的空白点击本来会一路掉进 D10 的"点空白返回"，
+        // 把浮层<b>背后</b>那一层弹掉：用户在设置页里点了下空白，什么都没看见，却发现退出设置后
+        // 面板停在了别的地方。捕获期间这一下先被这里吃掉，顺带把那个坑也盖住了。
+        //
+        // 点改键那一行不会误伤：那一行在 OnOptionRowClick 里已经把事件 Handled 掉，
+        // 根本走不到这里来。
+        if (IsCapturingHotkey)
+        {
+            CancelHotkeyCapture();
+            e.Handled = true;
+            return;
+        }
+
+        // 搜索态：点空白即退出搜索、回到进搜索前的那一层（D10 同一套手感）。
+        // 点了结果行的那一路已经在 SearchList 的处理器里 Handled，所以这里剩下的只有空白和列表自己的零件
+        // （滚动条不算空白——点在它上面不该把搜索关掉）。
+        if (_searching)
+        {
+            if (!e.Handled && RowFrom(e.OriginalSource) is null && !IsSearchChrome(e.OriginalSource))
+            {
+                SearchBox.Clear();
+                ExitSearch();
+                e.Handled = true;
+            }
             return;
         }
 
@@ -676,7 +774,18 @@ public partial class PanelWindow : Window
 
     private void OnKeyDown(object sender, KeyEventArgs e)
     {
+        // 改键必须排在最前面：它只在设置页里发生，而下面那条覆盖页守卫会把它一起挡掉。
         if (TryCaptureHotkey(e)) return;
+
+        // 覆盖页（设置 / 备忘录列表 / 备忘录编辑 / 搜索结果）开着的时候，键盘归那一层自己处理。
+        // 不拦的话 Esc 会掉进下面的「收起面板」分支：面板收起来了，覆盖页却还留在上面，
+        // 下次呼出直接停在那一层。三级链（编辑 → 列表 → 面板）本来就该一级一级退。
+        // 搜索层同样在册：它可见时 Backspace 只该删字，不该触发"返回上一层"。
+        // 它的 Esc 由搜索框自己的 PreviewKeyDown 先收走（那里比这里更早）。
+        if (SettingsPanel.Visibility == Visibility.Visible
+            || MemoPanel.Visibility == Visibility.Visible
+            || MemoEditPanel.Visibility == Visibility.Visible
+            || SearchPanel.Visibility == Visibility.Visible) return;
 
         // 拖拽中途按 Esc 只该取消拖拽，不能顺手把面板也收起来
         if (e.Key == Key.Escape && CancelDragIfAny())
@@ -799,6 +908,22 @@ public partial class PanelWindow : Window
     /// </summary>
     private void OnRightDown(object sender, MouseButtonEventArgs e)
     {
+        // 搜索态右键：结果行（备忘除外）给一套自己的菜单；点在列表空白/滚动条上则什么都不做，
+        // 更不会冒泡成"点空白退出"——右键不是用来退场的。
+        if (_searching)
+        {
+            var row = RowFrom(e.OriginalSource);
+            if (row is null || row.Hit.IsNote) { e.Handled = true; return; }
+
+            SearchList.SelectedItem = row;
+            var smenu = BuildSearchMenu(row.Hit);
+            smenu.PlacementTarget = this;
+            smenu.Placement = PlacementMode.MousePoint;
+            smenu.IsOpen = true;
+            e.Handled = true;
+            return;
+        }
+
         var tile = TileFrom(e.OriginalSource);
         if (tile is null) return;
 
@@ -840,7 +965,9 @@ public partial class PanelWindow : Window
         if (tile.EntryId is int eid)
         {
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem(tile.HasCustomLabel ? "恢复原名" : "重命名…", () => RenameEntry(eid)));
+            // 统一叫「重命名」，不再分「恢复原名」：改回去只要把上面那行的完整路径里的
+            // 本名再敲一遍（此时会当成"没有自定义"，标记自动清掉）。少一项菜单，少一层心智负担。
+            menu.Items.Add(MenuItem("重命名", () => RenameEntry(eid)));
             menu.Items.Add(tile.CustomIcon is null
                 ? MenuItem("更改图标…", () => ChangeIcon(eid, null))
                 : MenuItem("恢复系统图标", () => ChangeIcon(eid, null, clear: true)));
@@ -866,7 +993,7 @@ public partial class PanelWindow : Window
         else if (tile.GroupId is int gid)
         {
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem("重命名…", () => RenameGroup(gid)));
+            menu.Items.Add(MenuItem("重命名", () => RenameGroup(gid)));
             menu.Items.Add(Sep());
             menu.Items.Add(MenuItem("删除组合（条目退回主界面）", () =>
             {
@@ -876,13 +1003,17 @@ public partial class PanelWindow : Window
             }, danger: true));
         }
 
+        MarkMenuEdges(menu);
         return menu;
     }
 
     private MenuItem MenuItem(string text, Action act, bool danger = false)
     {
-        var item = new MenuItem { Header = text, Style = (Style)FindResource("PaperMenuItem") };
-        if (danger) item.Foreground = new SolidColorBrush(Color.FromRgb(0xB8, 0x40, 0x2E));
+        // 危险项用独立样式：悬停底与字色都在它的 Style.Triggers 里，
+        // 不再靠"模板里判断危险"——模板里的 DataTrigger 实测不生效（见 MenuLook 注释）。
+        // 顺带修掉一件旧事：危险字色原来写死 #B8402E，夜空纸下该用提亮过的 #E08373。
+        var style = (Style)FindResource(danger ? "PaperMenuItemDanger" : "PaperMenuItem");
+        var item = new MenuItem { Header = text, Style = style };
         item.Click += (_, _) => act();
         return item;
     }
@@ -890,21 +1021,97 @@ public partial class PanelWindow : Window
     /// <summary>分隔条要单独给样式，理由见 App.xaml 里「右键菜单：纸张化」那段注释。</summary>
     private Separator Sep() => new() { Style = (Style)FindResource("PaperSeparator") };
 
+    /// <summary>
+    /// 给菜单的<b>第一条和最后一条条目</b>打 Tag（first / last），
+    /// 让模板把它们的高亮圆角换成跟着外弧走的同心圆角。
+    ///
+    /// 所有右键菜单（磁贴 / 备忘 / 搜索结果）都要过这一道，这是 UI 手册里的一条几何标准，
+    /// 不是某一处菜单的临时补丁。分隔条不参与——它们不是"条目"。
+    /// </summary>
+    private static void MarkMenuEdges(ContextMenu menu)
+    {
+        var items = menu.Items.OfType<MenuItem>().ToList();
+        if (items.Count == 0) return;
+
+        // 同心圆角 = PanelRadius(22) − 菜单上下内边距(7) = 15。
+        // 值写进附加属性、模板用普通绑定取；模板里的 DataTrigger 那条路实测走不通。
+        var mid = new CornerRadius(8);
+
+        // 只有一条时上下两角都要顺弧
+        if (items.Count == 1)
+        {
+            MenuLook.SetCorner(items[0], new CornerRadius(15));
+            return;
+        }
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            var corner = i == 0 ? new CornerRadius(15, 15, 8, 8)
+                       : i == items.Count - 1 ? new CornerRadius(8, 8, 15, 15)
+                       : mid;
+            MenuLook.SetCorner(items[i], corner);
+        }
+    }
+
+    /// <summary>托盘菜单里的「退出」。由 App 接到真正的退出流程（要连托盘一起收掉）。</summary>
+    internal event EventHandler? ExitRequested;
+
+    /// <summary>
+    /// 托盘右键菜单。<b>与磁贴菜单同一套样式</b>（<c>PaperContextMenu</c> + <c>MenuItem</c>），
+    /// 所以 D27 的首末项同心圆角、危险色规则全部自动生效，不需要为新菜单写任何样式。
+    ///
+    /// 首项文字随面板状态在「呼出面板 / 收起面板」之间切换，右侧一列小字显示
+    /// <b>当前真正生效的</b>热键（改过键、或者默认键被占用后退让过，这里都会跟着变）。
+    /// </summary>
+    internal ContextMenu BuildTrayMenu()
+    {
+        var menu = new ContextMenu { Style = (Style)FindResource("PaperContextMenu") };
+
+        var toggle = MenuItem(IsPanelVisible ? "收起面板" : "呼出面板", () => Toggle());
+        MenuLook.SetIcon(toggle, MenuIcons.Panel);
+        MenuLook.SetHint(toggle, RegisteredHotkey?.Current?.Display);
+        menu.Items.Add(toggle);
+
+        var settings = MenuItem("设置", () =>
+        {
+            // 面板收起时，设置页是"看不见的"——它是面板里的覆盖层。
+            // 只发一句"打开设置页"，用户看到的就是点了没反应；必须先弹面板再开设置页。
+            if (!IsPanelVisible) ShowPanel();
+            OpenSettings();
+        });
+        // 滑杆而不是齿轮：原来那颗"圆 + 八根穿过圆周的辐条"在 16px 下读作太阳，
+        // 齿只在圈外的版本又太密，这个尺寸下最清楚的是三根线 + 错位旋钮
+        MenuLook.SetIcon(settings, MenuIcons.Sliders);
+        menu.Items.Add(settings);
+
+        menu.Items.Add(Sep());
+
+        // 退出用危险色：它会连托盘一起结束，是这个菜单里最重的动作
+        var exit = MenuItem("退出", () => ExitRequested?.Invoke(this, EventArgs.Empty), danger: true);
+        MenuLook.SetIcon(exit, MenuIcons.Power);
+        menu.Items.Add(exit);
+
+        MarkMenuEdges(menu);
+        return menu;
+    }
+
     private void ShowNativeMenu(TileVm tile)
     {
         if (string.IsNullOrWhiteSpace(tile.Path)) return;
+        ShowNativeMenu(tile.Path);
+    }
 
+    /// <summary>按路径弹系统「资源管理器菜单」。搜索结果没有 TileVm，走这一个。</summary>
+    private void ShowNativeMenu(string path)
+    {
         // 此刻 WPF 的 ContextMenu 还在关闭动画里，同步弹原生菜单会和它抢前台、
         // 菜单一闪就没。记下坐标，等这一轮消息泵空了再弹。
         var cursor = System.Windows.Forms.Cursor.Position;
         int x = cursor.X, y = cursor.Y;
-        string path = tile.Path;
 
         _ = Dispatcher.BeginInvoke(new Action(() =>
         {
             bool ok = NativeContextMenu.TryShow(Handle, path, x, y);
-            App.Log($"native menu ok={ok} verbs={NativeContextMenu.LastVerbCount} " +
-                    $"fail='{NativeContextMenu.LastFailure}'");
             if (!ok && !string.IsNullOrEmpty(NativeContextMenu.LastFailure))
                 Status("系统菜单不可用：" + NativeContextMenu.LastFailure);
         }), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
@@ -915,12 +1122,25 @@ public partial class PanelWindow : Window
         var entry = _store.Entry(id);
         if (entry is null) return;
 
-        string? typed = PromptText.Show(this, "重命名", entry.Label ?? entry.Path);
+        // 预填**面板上显示的那个名字**，而不是 entry.Label ?? entry.Path。
+        // entry.Label 是"用户自定义名"，新拖进来的还没有，旧写法就整条路径塞进了输入框
+        // —— 用户以为在改名字，其实框里是一条完整路径。
+        // TileVm.Label 才是真的显示名：它已经在 BoardBuilder.FromEntry 里做过
+        // 「自定义名 ?? 路径推导名」，之后还会被 Shell 显示名替换（IconPump 只改没自定义过的）。
+        string initial = DeriveFromTile(id) ?? BoardBuilder.DeriveName(entry.Path, entry.IsDir);
+
+        // 路径永远显示在标题下面：仅凭显示名分不清谁是谁（面板上三个同名文件是常事），
+        // 而且刚才那条"和 initial 相同就不显示"的判断，恰好让新条目第一次打开时连路径都没有。
+        string? typed = PromptText.Show(this, "重命名", initial, entry.Path);
         if (typed is null) return;
 
-        // 和 Shell 显示名一致就等于没改，把自定义标记清掉，免得以后图标改名不跟随
-        bool sameAsShell = string.Equals(typed, DeriveFromTile(id), StringComparison.Ordinal);
-        _store.RenameEntry(id, sameAsShell ? null : typed);
+        // 敲的就是磁盘上的本名（或从本名推导出来的那个）时，等于没有"自定义"这回事：
+        // 清掉标记，以后系统显示名改了它跟着走。
+        // 注意这里比的是**推导名**而不是 tile.Label —— 后者在改过名之后就是用户自己那串字，
+        // 拿它当基准会让"原样不动点确定"悄悄退化成恢复原名。
+        bool sameAsDerived = string.Equals(typed, BoardBuilder.DeriveName(entry.Path, entry.IsDir),
+                                           StringComparison.Ordinal);
+        _store.RenameEntry(id, sameAsDerived ? null : typed);
         Render(animate: false);
     }
 
@@ -930,7 +1150,8 @@ public partial class PanelWindow : Window
         var group = _store.Group(id);
         if (group is null) return;
 
-        string? typed = PromptText.Show(this, "重命名组合", group.Title);
+        // 不给第二行提示：组合名在磁盘上没有对应物，说"不改动任何文件"反而像在道歉
+        string? typed = PromptText.Show(this, "重命名", group.Title);
         if (typed is null) return;
 
         _store.RenameGroup(id, typed);
@@ -1070,7 +1291,15 @@ public partial class PanelWindow : Window
         if (saved.Count > 0) _nav.ReplaceWith(saved);
     }
 
-    private void Status(string text) => StatusText.Text = text;
+    private void Status(string text)
+    {
+        StatusText.Text = text;
+
+        // 设置页（RowSpan=5）把主状态栏盖住了，而改键成败、开关切换这些提示
+        // 大多发生在设置页里 —— 只写 StatusText 用户根本看不见。
+        // 路由一份到设置页自己的状态行；备忘两个覆盖层（MemoStatus / MemoEditStatus）是同一套。
+        if (SettingsPanel.Visibility == Visibility.Visible) SettingsStatus.Text = text;
+    }
 }
 
 /// <summary>Shell 动作。M1 只需要这三件，M2 会扩到完整右键菜单。</summary>

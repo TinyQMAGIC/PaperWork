@@ -89,13 +89,23 @@ public sealed class TilePanel : Panel
 
                 for (int i = first; i < last; i++)
                 {
+                    // 整行等高 + 顶部对齐。两个参数是一对，只改一个都不行：
+                    //
+                    // 高度用 rowH（本行最高磁贴）而不是各自的 DesiredSize：
+                    //   标签最多两行（LineHeight 14 / MaxHeight 30），所以同一行里磁贴能差 14px。
+                    //   给各自的 h，短名字那格的悬停高亮就会比邻格矮一截——一行里高亮块高低不一。
+                    //
+                    // 纵坐标直接用 y 而不是 (rowH - h) / 2：
+                    //   居中的是**格子**，不是**图标**。格子一居中，图标就跟着上下飘，
+                    //   一行里名字长短不同时图标能错开 7px，横向看就是"一高一矮"。
+                    //   顶部对齐后所有图标落在同一条基线上，短名字多出来的空白留在格子内部，
+                    //   平时看不见。这是文件管理器图标视图的通行做法。
                     UIElement child = InternalChildren[i];
-                    double h = child.DesiredSize.Height;
                     child.Arrange(new Rect(
                         (i - first) * (tileWidth + Gap),
-                        y + (rowH - h) / 2,          // 行内垂直居中，标签行数不同也不会顶齐
+                        y,
                         tileWidth,
-                        h));
+                        rowH));
                 }
 
                 y += rowH + Gap;

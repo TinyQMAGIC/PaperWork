@@ -17,6 +17,12 @@ namespace Paperwork.Shell;
 /// 拆成两套会重复访问文件系统，而且很容易在 UI 线程上不小心调一次
 /// <c>File.Exists</c>——那对掉线的网络共享能阻塞数秒。
 ///
+/// <b>只有要显示真图标的磁贴才取位图</b>（<see cref="TileVm.WantsShellIcon"/>：程序/快捷方式，
+/// 以及用户显式「改图标」的）。普通文件与文件夹显示的是预设线稿，但它们<b>照样</b>要查 Shell——
+/// 显示名（本地化名）和失效判定都从那儿来——所以走的还是同一条队列，只是
+/// <see cref="Request.WantImage"/> 为 false 时不碰图标。这条口子来自 2026-09-29 的内存排查：
+/// 进文件夹会白缓存几十张永远不显示的位图。
+///
 /// 线程分工是这里最容易写错的地方：
 /// <list type="bullet">
 ///   <item>后台线程：只做 Shell 查询（SHGetFileInfo / SHGetImageList / GetIcon），拿到 HICON 句柄</item>
@@ -27,11 +33,20 @@ namespace Paperwork.Shell;
 /// </summary>
 public sealed class IconPump : IDisposable
 {
-    /// <summary>可见期间的缓存上限，按**像素预算**算而不是按条数（BGRA32 = 4 字节/像素）。</summary>
+    /// <summary>可见期间的缓存上限，按**像素预算**算而不是按条数（BGRA32 = 4 字节/像素）。
+    /// 这里只管位图占的字节；条数另有 <see cref="MaxEntries"/> 兜底。</summary>
     private const long VisibleBudget = 8L * 1024 * 1024;
 
     /// <summary>隐藏期间的预算（D18：骨架留着，可重建的数据丢掉）。</summary>
     private const long TrimmedBudget = 2L * 1024 * 1024;
+
+    /// <summary>
+    /// 条目数的硬上限。**光按像素收是不够的**：取不到位图的条目（失效路径、Shell 拒绝返回）
+    /// 计入 0 像素，字节数上它们永远超不了预算，字典和链表就会只增不减。
+    /// 2026-09-29 之后普通文件也不再存位图，条数上限成了缓存唯一的兜底闸门。
+    /// 2000 条 ×（记录 + 路径 + 显示名 + 类型名）≈ 1MB 以内。
+    /// </summary>
+    private const int MaxEntries = 2000;
 
     /// <summary>BGRA32。</summary>
     private const int BytesPerPixel = 4;
@@ -40,7 +55,7 @@ public sealed class IconPump : IDisposable
     private readonly LinkedList<CacheEntry> _lru = new();
     private readonly object _gate = new();
 
-    /// <summary>当前缓存占的像素字节数。用条目数当上限会被 DPI 打穿：
+    /// <summary>当前缓存里的位图占的像素字节数。用条目数当上限会被 DPI 打穿：
     /// 56px 档在 200% 缩放下实际是 112px，单张 50KB——512 条就是 25MB，
     /// 而同一份数量在 32px 档只有 2MB。所以这里必须按字节收，让高 DPI 自动少缓存几张。</summary>
     private long _pixels;
@@ -64,7 +79,13 @@ public sealed class IconPump : IDisposable
     private sealed record CacheEntry(
         string Key, ImageSource? Image, string DisplayName, string TypeName, bool Exists, string? DeadReason);
 
-    private sealed record Request(TileVm Tile, string Key, int Px);
+    /// <summary>
+    /// <paramref name="WantImage"/> 是发起这次查询时就定下来的：为 false 的请求只拿
+    /// 显示名与失效状态，缓存条目里 <c>Image</c> 恒为 null。同一个路径的这个值恒定
+    /// （由扩展名 / 自定义图标决定，见 <see cref="TileVm.WantsShellIcon"/>），
+    /// 所以不会出现"同一个 key 一会儿要图一会儿不要图"。
+    /// </summary>
+    private sealed record Request(TileVm Tile, string Key, int Px, bool WantImage);
 
     public IconPump(Dispatcher dispatcher)
     {
@@ -130,7 +151,11 @@ public sealed class IconPump : IDisposable
                 }
             }
 
-            _queue.Writer.TryWrite(new Request(tile, key, targetPx));
+            // 要不要真图由磁贴自己说了算（TileVm.WantsShellIcon）：程序/快捷方式与显式改图标的取，
+            // 其余文件类只查显示名与失效判定。别小看这一句——原来进一个 30 项的文件夹，
+            // 30 个普通文件每张图都要 Shell 同步渲染一遍再白存进缓存（42px 档 ≈0.2MB、
+            // 56px@200% 档 ≈1.5MB），而界面上这些磁贴显示的是预设线稿，取回来就扔。
+            _queue.Writer.TryWrite(new Request(tile, key, targetPx, tile.WantsShellIcon));
         }
     }
 
@@ -142,14 +167,14 @@ public sealed class IconPump : IDisposable
         try
         {
             if (req.Tile.CustomIcon is not { Length: > 0 } custom)
-                return ShellIcons.Query(req.Tile.Path, req.Px);
+                return ShellIcons.Query(req.Tile.Path, req.Px, req.WantImage);
 
-            var viaCustom = ShellIcons.Query(custom, req.Px);
+            var viaCustom = ShellIcons.Query(custom, req.Px, req.WantImage);
             if (viaCustom.Handle != IntPtr.Zero && viaCustom.Exists) return viaCustom;
 
             // 自定义图标文件本身没了：释放 GDI 句柄，退回真实路径的图标
             ShellIcons.Release(viaCustom.Handle, viaCustom.Kind);
-            return ShellIcons.Query(req.Tile.Path, req.Px);
+            return ShellIcons.Query(req.Tile.Path, req.Px, req.WantImage);
         }
         catch (Exception)
         {
@@ -168,9 +193,15 @@ public sealed class IconPump : IDisposable
             result.Exists,
             result.DeadReason);
 
-        if (entry.Image is not null) Interlocked.Increment(ref _served);
-        else if (Interlocked.Increment(ref _failed) <= 3)
-            App.Log($"icon MISS {ShellIcons.LastFailure} :: {result.DisplayName} exists={result.Exists}");
+        // 两个计数由 Served / Failed 对外暴露，不写日志——图标没取到是常态
+        // （缺权限、网络盘离线、缩略图不可用都会走到），记下来只会淹掉真异常。
+        // 没请求位图的那批（普通文件/文件夹）两边都不计：它们"没有图"是设计，不是失败，
+        // 否则 Failed 会被这些白名单条目淹掉，真失败反而看不出来。
+        if (req.WantImage)
+        {
+            if (entry.Image is not null) Interlocked.Increment(ref _served);
+            else Interlocked.Increment(ref _failed);
+        }
 
         Insert(entry);
         Apply(req.Tile, entry);
@@ -179,6 +210,8 @@ public sealed class IconPump : IDisposable
     private void Apply(TileVm tile, CacheEntry entry)
     {
         // 只把**图像**写回磁贴，而且只给程序/快捷方式与显式「改图标」的（见 TileVm.WantsShellIcon）。
+        // Enqueue 已经保证了不要图的磁贴不会取到图，这里是同一条口径的第二道闸：
+        // 缓存命中复用那条路径也走这句，两边不对齐就会出现"线稿磁贴突然变成 Shell 图标"。
         // 这次 Shell 查询还要顺带拿显示名与失效判定，那两样一律照单全收——它们跟图标是什么画风无关。
         if (entry.Image is not null && tile.WantsShellIcon) tile.Icon = entry.Image;
 
@@ -220,7 +253,11 @@ public sealed class IconPump : IDisposable
     private void EvictToBudget()
     {
         long budget = _trimmed ? TrimmedBudget : VisibleBudget;
-        while (_pixels > budget && _lru.Last is not null) EvictOne();
+
+        // 两个闸门里任意一个越线就继续丢最旧的。条数那条不能省：失效路径这类
+        // 取不到位图的条目计 0 像素，只盯字节数的话它们一辈子都不会被淘汰。
+        while (_lru.Last is not null && (_pixels > budget || _lru.Count > MaxEntries))
+            EvictOne();
     }
 
     private static long PixelsOf(ImageSource? image) =>

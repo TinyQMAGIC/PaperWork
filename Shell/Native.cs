@@ -38,6 +38,9 @@ internal static class Native
     public const int WM_APP = 0x8000;
     public const int WM_SHOWTOGGLE = WM_APP + 1;   // 二次启动时发给已存在的实例
 
+    /// <summary>非客户区双击。标题栏双击最大化走的就是它（wParam = HTCAPTION）。</summary>
+    public const int WM_NCLBUTTONDBLCLK = 0x00A3;
+
     // ---------------- 热键 ----------------
     public const uint MOD_ALT = 0x1;
     public const uint MOD_CONTROL = 0x2;

@@ -105,7 +105,18 @@ public static class ShellIcons
     /// <summary>诊断用：最近一次失败的原因。正常运行不读。</summary>
     internal static string LastFailure { get; private set; } = string.Empty;
 
-    public static Pending Query(string path, int targetPx)
+    public static Pending Query(string path, int targetPx) => Query(path, targetPx, wantImage: true);
+
+    /// <summary>
+    /// <paramref name="wantImage"/> 为 false 时只查显示名与失效状态，完全不碰图标。
+    ///
+    /// 普通文件与文件夹磁贴显示的是预设线稿（<see cref="TileVm.WantsShellIcon"/> 为 false），
+    /// 给它们取位图等于白画——而取图是这条链上最贵的一环：新建两个 COM 对象、
+    /// 让 Shell 同步渲染一张 32 位带 alpha 的图（见 <see cref="BitmapFromShellItem"/>）。
+    /// 进一个 30 项的文件夹，这一句能省下 30 次渲染、30 张位图、30 次 COM 往返。
+    /// 显示名与失效判定照旧——它们跟图标是什么画风无关。
+    /// </summary>
+    public static Pending Query(string path, int targetPx, bool wantImage)
     {
         bool exists = false, isDir = false;
         try
@@ -134,7 +145,8 @@ public static class ShellIcons
             return new Pending(IntPtr.Zero, HandleKind.None, displayName, shfi.szTypeName ?? string.Empty,
                                false, ReasonFor(path));
 
-        IntPtr hbmp = BitmapFromShellItem(path, targetPx);
+        // 不要图就到此为止：显示名与失效状态已经拿到，省掉两个 COM 对象和一次 Shell 渲染
+        IntPtr hbmp = wantImage ? BitmapFromShellItem(path, targetPx) : IntPtr.Zero;
         if (hbmp != IntPtr.Zero)
             return new Pending(hbmp, HandleKind.GdiBitmap, displayName, shfi.szTypeName ?? string.Empty, true, null);
 

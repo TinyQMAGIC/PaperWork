@@ -27,7 +27,9 @@ public partial class PanelWindow
 
     private void InitSettings()
     {
-        SettingsButton.Click += (_, _) => OpenSettings();
+        // 先退搜索：设置页是整块覆盖层，压在搜索结果上面的话，
+        // 关掉设置页会掉回一堆"已经不属于当前视野"的搜索结果里。
+        SettingsButton.Click += (_, _) => { ExitSearch(); OpenSettings(); };
         SettingsClose.Click += (_, _) => CloseSettings();
         PreviewKeyDown += OnSettingsKeyDown;
 
@@ -79,6 +81,18 @@ public partial class PanelWindow
 
         RefreshSettingVisuals();
         SettingsPanel.Visibility = Visibility.Visible;
+
+        // 清完焦点必须再交出去，否则设置页一个可聚焦的东西都没有。
+        //
+        // 上面那两行（ClearFocus + SetFocusedElement(null)）是 M4-P4 用来压掉标题栏按钮
+        // 焦点虚框的，本身没错；但叠加了"ScrollViewer 也设了 Focusable=False"之后，
+        // 焦点就彻底无处可落 —— WPF 没有键盘事件的目标，于是：
+        //   · 改键永远停在「按下新组合键…」，按什么都没反应；
+        //   · Esc 关设置页同样失效（OnSettingsKeyDown 根本不会触发）。
+        // 面板仍然是前台窗口（实测确认），所以这不是"没激活"，是"窗口里没有焦点元素"。
+        //
+        // 焦点框不会因为这一个落点复现：App 级已把 FocusVisualStyleKey 覆盖成空模板。
+        Keyboard.Focus(SettingsRoot);
     }
 
     private void CloseSettings()
@@ -86,16 +100,26 @@ public partial class PanelWindow
         SettingsPanel.Visibility = Visibility.Collapsed;
         SettingsButton.IsEnabled = true;
         HideButton.IsEnabled = true;
+        EndHotkeyCaptureIfAny();
+        // 残留的提示（比如改键失败那句）下次打开还在 —— 状态行只在有话说的那几秒有效
+        SettingsStatus.Text = string.Empty;
     }
 
     private void OnOptionRowClick(object sender, MouseButtonEventArgs e)
     {
         if (e.OriginalSource is not DependencyObject node) return;
 
-        for (DependencyObject? cur = node; cur is not null; cur = VisualTreeHelper.GetParent(cur))
+        // 同 TileFrom：选项行里将来可能出现 Run 这类非 Visual 元素，用 ParentOf 兜住
+        for (DependencyObject? cur = node; cur is not null; cur = ParentOf(cur))
         {
             if (cur is Border { Tag: string tag } && tag.Contains(':'))
             {
+                // 点了别的选项行 = 用户已经离开"改键"这件事，顺手结束捕获。
+                // 不这么做的话捕获会一直挂着：用户以为已经走了，下一次随手按一个键就被当成新键位录进去。
+                // 点的还是改键那一行时不动它 —— 那一行的动作是重新进入捕获（下面的 ApplyOption 会做）。
+                if (_capturingHotkey && !tag.StartsWith("hotkey", StringComparison.Ordinal))
+                    CancelHotkeyCapture();
+
                 ApplyOption(tag);
                 e.Handled = true;
                 return;
@@ -159,6 +183,7 @@ public partial class PanelWindow
         {
             case "autorun": settings.Autorun = !settings.Autorun; break;
             case "trayonclose": settings.CloseToTray = !settings.CloseToTray; break;
+            case "hideonfullscreen": settings.HideOnFullscreen = !settings.HideOnFullscreen; break;
 
             // 角标是磁贴模板里的一个元素，开关只改数据看不到效果，得把这一层重铺一遍。
             // 只有这一项需要 Render——主题/图标/锚点都走 DynamicResource 或只改窗口属性。
@@ -226,8 +251,14 @@ public partial class PanelWindow
         PaintToggle(togAutorun, knobAutorun, s.Autorun);
         PaintToggle(togTrayOnClose, knobTrayOnClose, s.CloseToTray);
         PaintToggle(togGroupBadge, knobGroupBadge, s.ShowGroupBadge);
+        PaintToggle(togFullscreen, knobFullscreen, s.HideOnFullscreen);
         PaintToggle(togAnchor, knobAnchor, s.Anchor == SummonAnchor.FollowCursor);
+        // 这一处是红色的<b>唯一</b>复位点：成功、Esc 取消、下次打开设置页都走它。
+        // 漏了它，红字会残留到下一次进设置页。
+        // 注意只能设回 Ink2 —— XAML 里这行原本就是 {DynamicResource Ink2}；
+        // 用 ClearValue 会掉成继承来的 Ink，比原来深一档，等于悄悄改了设计。
         HotkeyText.Text = RegisteredHotkey?.Current?.Display ?? "未设置";
+        HotkeyText.SetResourceReference(TextBlock.ForegroundProperty, "Ink2");
     }
 
     private void PaintToggle(Border pill, FrameworkElement knob, bool on)
@@ -243,7 +274,47 @@ public partial class PanelWindow
     {
         _capturingHotkey = true;
         HotkeyText.Text = "按下新组合键…";
-        Status("请按下新的组合键（至少一个修饰键），Esc 取消");
+        // 顺手复位颜色：万一上次的红字残留了下来，占位文字不该是红的
+        HotkeyText.SetResourceReference(TextBlock.ForegroundProperty, "Ink2");
+        // 这句提示现在要解释一种"什么都没发生"的情况：
+        // 组合键被别的程序注册成全局热键时，那颗键会被对方截走 —— 我们的捕获连按键都收不到，
+        // 于是既不会录入、也不会报冲突（拿不到 1409，红字那条分支到不了，见 README）。
+        // 用户看到的就是"按下没反应"，所以这里先把这个现象翻译成一句话说清楚。
+        // 信息顺序是刻意的：状态栏宽约 418px、字号 10.5，TextBlock 又没设 TextTrimming，
+        // 超长会被直接切掉 —— 所以要紧的原因排在前面，"Esc 取消"放最后（最不怕被切）。
+        Status("请按下新组合键（至少一个修饰键）；若按下后毫无反应，说明它已被其它程序占用。Esc 取消");
+
+        // 再钉一次焦点：点选项行这种不可聚焦的元素时，WPF 有可能把焦点挪走。
+        // 焦点一丢，下面的按键就一个都收不到（原因见 OpenSettings 里那段注释）。
+        Keyboard.Focus(SettingsRoot);
+    }
+
+    /// <summary>
+    /// 放弃这次录入：键位保持原样，捕获结束，那一行恢复成当前键位。
+    /// <b>Esc 与"点空白"共用它</b> —— 两条路的语义必须完全一致，否则用户会记住两套手感。
+    /// </summary>
+    private void CancelHotkeyCapture()
+    {
+        _capturingHotkey = false;
+        RefreshSettingVisuals();
+        Status("已取消");
+    }
+
+    /// <summary>是不是正停在改键行上（供面板级的点击/按键守卫询问）。</summary>
+    internal bool IsCapturingHotkey => _capturingHotkey;
+
+    /// <summary>
+    /// 收尾：关闭设置页 / 收起面板时，捕获状态绝不允许残留。
+    ///
+    /// 留着会出怪事：面板级的点击守卫看到"正在改键"，就会把用户接下来点面板上任何地方
+    /// 都当成"点空白退出改键"吃掉 —— 表现是"点了没反应"，而且怎么点都找不到原因。
+    /// 这里不写 Status（面板都要收了，没人看得见）。
+    /// </summary>
+    internal void EndHotkeyCaptureIfAny()
+    {
+        if (!_capturingHotkey) return;
+        _capturingHotkey = false;
+        RefreshSettingVisuals();
     }
 
     /// <summary>返回 true 表示这次按键已被改键流程吃掉。</summary>
@@ -255,9 +326,7 @@ public partial class PanelWindow
 
         if (e.Key == Key.Escape)
         {
-            _capturingHotkey = false;
-            RefreshSettingVisuals();
-            Status("已取消");
+            CancelHotkeyCapture();
             return true;
         }
 
@@ -289,24 +358,79 @@ public partial class PanelWindow
             return true;
         }
 
-        var chord = HotkeyChord.FromInput(key, mods);
+        CommitHotkey(HotkeyChord.FromInput(key, mods));
+        return true;
+    }
 
+    /// <summary>
+    /// 提交一个新键位：先注册，成功才写盘。<b>两条路共用它</b> ——
+    /// ① WPF 按键那条（<see cref="TryCaptureHotkey"/>，捕获中按到任何"还没注册"的组合）；
+    /// ② <c>WM_HOTKEY</c> 那条（捕获中按到<b>当前正注册着</b>的那个组合，见
+    /// <see cref="CommitHotkeyFromHotkeyMessage"/>）。合成一处，免得两条路各写一份存盘与提示。
+    /// </summary>
+    private void CommitHotkey(HotkeyChord chord)
+    {
         // 先注册新的，成功才提交；失败由 GlobalHotkey.TryRebind 自己回滚旧的
         var result = RegisteredHotkey?.TryRebind(chord) ?? HotkeyResult.Error(-1);
-        _capturingHotkey = false;
 
         if (result.Success)
         {
+            _capturingHotkey = false;
             _store.State.Settings.Hotkey = chord.Display;
             _store.Save();
             Status($"已改为 {chord}");
-        }
-        else
-        {
-            Status(result.Message);
+            RefreshSettingVisuals();
+            return;
         }
 
-        RefreshSettingVisuals();
+        // 失败：留在捕获态，把原因写进那一行（红字）。
+        //
+        // 为什么不能像以前那样"回滚 + 写状态栏就完事"：Status() 写的是底部那一行，
+        // 而同一个 TextBlock 又被 Render 用来显示"N 项" —— 消息一写进去就被覆盖，
+        // 于是用户看到的就是"按了没反应、键位还是原来那个"。改键行是唯一站得住的位置。
+        //
+        // 为什么留在捕获态：红字只在捕获期间有意义。一退出，下一次 RefreshSettingVisuals
+        // 就会把它恢复成旧键位，红字等于闪一下就没了 —— 那就还是没提示。
+        // 留着的话，用户可以直接按下一个候选，不用再点一次那一行。
+        ShowHotkeyProblem(result.Status == HotkeyStatus.Conflict
+            ? "有组合键冲突"
+            : $"注册失败（Win32 {result.Win32Error}）");
+
+        Status(result.Message);
+    }
+
+    /// <summary>
+    /// 把改键那一行变成红色的问题提示。字体、位置、chip 边框一概不动 —— 只换字与笔。
+    ///
+    /// 用 <c>SetResourceReference</c> 而不是取一次画笔：用户在设置页里顺手换个主题时，
+    /// 这行红字要跟着变成新主题的危险色（D15）。取一次画笔的话它会留在旧主题的颜色上。
+    /// </summary>
+    private void ShowHotkeyProblem(string text)
+    {
+        HotkeyText.Text = text;
+        HotkeyText.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+    }
+
+    /// <summary>
+    /// 捕获中按到了<b>当前已注册的那个组合</b>。
+    ///
+    /// 这颗键被系统吞成了 <c>WM_HOTKEY</c>，WPF 的按键事件里根本没有它，
+    /// 所以 <see cref="TryCaptureHotkey"/> 永远等不到 —— 先在 Win32 层把它认回来。
+    /// 此刻它的语义是"用户又确认了一遍旧键"，不是"呼出/收起"：
+    /// 拿注册着的组合直接完成录入，<b>面板保持不动</b>。
+    ///
+    /// 顺带说明为什么只可能是"同一个组合"：能触发 WM_HOTKEY 的只有已注册的那一个，
+    /// 别的组合走的是普通按键流，本来就正常进 <see cref="TryCaptureHotkey"/>。
+    /// </summary>
+    /// <returns>true 表示这次 WM_HOTKEY 已被改键流程吃掉，不该再走呼出/收起。</returns>
+    internal bool CommitHotkeyFromHotkeyMessage()
+    {
+        if (!_capturingHotkey) return false;
+
+        var chord = RegisteredHotkey?.Current;
+        if (chord is null) return false;
+
+        CommitHotkey(chord.Value);
         return true;
     }
 }

@@ -25,8 +25,8 @@
     <!-- 调色板本身在 App.xaml 的应用级资源里，由 Themes/Palette.Apply 覆盖。
          这里只放非颜色的常量，避免窗口级资源把动态主题挡住。
          圆角 PanelRadius 也放在应用级——右键菜单要用同一个值。 -->
-    <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Segoe UI Mono</FontFamily>
-    <FontFamily x:Key="BookFont">Iowan Old Style, Palatino Linotype, Georgia, Segoe UI</FontFamily>
+    <!-- 颜色以外的常量（字体、圆角）一律放 App.xaml：重命名对话框是另一个 Window，
+         窗口级资源它取不到。以前 BookFont / MonoFont 放在这里。 -->
 
     <!-- 滚动条按 ui-mock.html 的 .scroll::-webkit-scrollbar 来：7px 宽、无轨道底色、
          无上下箭头；滑块左右各让 1px 纸色（净宽 5px）的胶囊，悬停换 AccentLine。
@@ -732,7 +732,7 @@
                   Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
           </Button>
-          <Button x:Name="HideButton" Style="{StaticResource IconButton}" ToolTip="收起（收进托盘）">
+          <Button x:Name="HideButton" Style="{StaticResource IconButton}" ToolTip="关闭">
             <TextBlock Text="&#xE8BB;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="13"/>
           </Button>
         </StackPanel>
@@ -750,7 +750,9 @@
               BorderThickness="1" CornerRadius="9"
               WindowChrome.IsHitTestVisibleInChrome="True">
         <Grid>
-          <TextBlock x:Name="SearchHint" Text="搜索本层…" Margin="9,0,0,0" VerticalAlignment="Center"
+          <!-- 不再写「搜索本层」：现在是全局搜索（条目 / 组合 / 备忘），
+               但**不含文件夹内部**——那句话放在空态里说，不是放在占位符里。 -->
+          <TextBlock x:Name="SearchHint" Text="搜索…" Margin="9,0,0,0" VerticalAlignment="Center"
                      FontSize="11.5" Foreground="{DynamicResource Ink3}" IsHitTestVisible="False"/>
           <TextBox x:Name="SearchBox" Margin="6,0,6,0" Padding="4,0,0,0" VerticalContentAlignment="Center"
                    Background="Transparent" BorderThickness="0" FontSize="11.5"
@@ -800,6 +802,147 @@
 
       <TextBlock Grid.Row="4" x:Name="StatusText" Margin="16,6,86,10"
                  FontSize="10.5" Foreground="{DynamicResource Ink3}"/>
+
+      <!-- ============================ 全局搜索 ============================
+           只占内容区（第 4 行起、跨到状态行），**标题行与搜索框一律不动**：
+           搜索框位置、左上角面包屑位置都与首页完全一致，输入时界面不跳。
+           背景留 Transparent：右下角那两道伸缩斜线要透出来，那是面板自己的装饰。
+
+           行卡片的规格直接抄备忘列表的 NoteCard（padding 12,9 / 圆角 10 / 标题 12.5 SemiBold /
+           副信息 11 且行高 16.5），不另起一套——UI 手册里"列表就该长这样"只有一个答案。 -->
+      <Border x:Name="SearchPanel" Grid.Row="3" Grid.RowSpan="2" Background="Transparent" Visibility="Collapsed">
+        <Grid>
+          <!-- 定位抄备忘页的 ScrollViewer：上 6 = 与发丝线的空档；右 12 = 避开拉伸热区；
+               下 22 = 让开圆角，滚动条不画进 R 角。 -->
+          <ListBox x:Name="SearchList" Margin="0,6,12,22" Padding="16,0,14,4"
+                   Background="Transparent" BorderThickness="0" Focusable="False"
+                   HorizontalContentAlignment="Stretch"
+                   ScrollViewer.VerticalScrollBarVisibility="Auto"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            <ListBox.ItemContainerStyle>
+              <Style TargetType="ListBoxItem">
+                <!-- 不可聚焦：点了结果之后光标必须还留在搜索框里，否则接着打字就打不进去了。
+                     ↑↓ / Enter 由搜索框自己的 PreviewKeyDown 处理。 -->
+                <Setter Property="Focusable" Value="False"/>
+                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                <Setter Property="Margin" Value="0,0,0,6"/>
+                <Setter Property="Template">
+                  <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                      <Border x:Name="bd" Background="{DynamicResource Paper2}"
+                              BorderBrush="{DynamicResource Rule}" BorderThickness="1"
+                              CornerRadius="10" Padding="12,9,12,9">
+                        <ContentPresenter/>
+                      </Border>
+                      <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                          <Setter TargetName="bd" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                          <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+                        </Trigger>
+                        <Trigger Property="IsSelected" Value="True">
+                          <Setter TargetName="bd" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                          <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+                        </Trigger>
+                      </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                  </Setter.Value>
+                </Setter>
+              </Style>
+            </ListBox.ItemContainerStyle>
+
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+
+                  <!-- 类型标识：条目走预设线稿，备忘走备忘形 + 强调色淡底，
+                       组合走首页同款 2×2 迷你格（它是"容器"，和文件夹不是一回事）。
+                       必须 VerticalAlignment=Center：卡片里文字有两行，图形格子比文字矮，
+                       靠上的话就是"图标顶在上面、下面空一截"——视觉上整个列表左重右轻。 -->
+                  <Border x:Name="glyphBox" Grid.Column="0" Width="28" Height="28" CornerRadius="8"
+                          Background="{DynamicResource Paper2}" BorderBrush="{DynamicResource Rule}"
+                          BorderThickness="1" VerticalAlignment="Center">
+                    <Grid>
+                      <!-- 程序/自定义图标走真图标（IconPump 异步填），线稿只在没拿到时兜底 -->
+                      <Image x:Name="art" Width="18" Height="18" Stretch="Uniform"
+                             Source="{Binding Icon}" Visibility="{Binding IconVisibility}"
+                             RenderOptions.BitmapScalingMode="HighQuality"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                      <Path x:Name="glyph" Width="16" Height="16" Stretch="Uniform"
+                            Data="{Binding Glyph}" Stroke="{DynamicResource Ink2}"
+                            StrokeThickness="1.6" StrokeLineJoin="Round"
+                            Visibility="{Binding GlyphVisibility}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                      <UniformGrid x:Name="mini" Rows="2" Columns="2" Width="16" Height="16"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Visibility="Collapsed">
+                        <Border CornerRadius="3" Background="{DynamicResource AccentSoft}" BorderBrush="{DynamicResource AccentLine}" BorderThickness="1"/>
+                        <Border CornerRadius="3" Background="{DynamicResource Paper}" BorderBrush="{DynamicResource Rule}" BorderThickness="1"/>
+                        <Border CornerRadius="3" Background="{DynamicResource Paper}" BorderBrush="{DynamicResource Rule}" BorderThickness="1"/>
+                        <Border CornerRadius="3" Background="{DynamicResource AccentSoft}" BorderBrush="{DynamicResource AccentLine}" BorderThickness="1"/>
+                      </UniformGrid>
+                    </Grid>
+                  </Border>
+
+                  <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                    <TextBlock FontSize="12.5" FontWeight="SemiBold" Foreground="{DynamicResource Ink}"
+                               TextTrimming="CharacterEllipsis">
+                      <Run Text="{Binding Name.Prefix}"/><Run Text="{Binding Name.Match}"
+                           Foreground="{DynamicResource Accent}" Background="{DynamicResource AccentSoft}"
+                           FontWeight="Bold"/><Run Text="{Binding Name.Suffix}"/>
+                    </TextBlock>
+                    <TextBlock FontSize="11" LineHeight="16.5" Margin="0,3,0,0"
+                               Foreground="{DynamicResource Ink2}" TextTrimming="CharacterEllipsis">
+                      <Run Text="{Binding Sub.Prefix}"/><Run Text="{Binding Sub.Match}"
+                           Foreground="{DynamicResource Accent}"/><Run Text="{Binding Sub.Suffix}"/>
+                    </TextBlock>
+                  </StackPanel>
+
+                  <!-- 备忘右端钉标签：没标题的备忘名字位显示的是正文首行，
+                       没有这个标签就认不出它是备忘。 -->
+                  <TextBlock Grid.Column="2" Text="备忘" FontSize="10" Margin="10,0,0,0"
+                             VerticalAlignment="Top" Foreground="{DynamicResource Ink3}"
+                             Visibility="{Binding IsNote, Converter={StaticResource BoolVis}}"/>
+                </Grid>
+
+                <!-- 用 x:Static 而不是写 Value="Group"：DataTrigger.Value 是 object，
+                     写字符串就是字符串，不会自动变成枚举——那样永远匹配不上，静默失效。 -->
+                <DataTemplate.Triggers>
+                  <DataTrigger Binding="{Binding Kind}" Value="{x:Static data:SearchHitKind.Group}">
+                    <Setter TargetName="glyph" Property="Visibility" Value="Collapsed"/>
+                    <Setter TargetName="mini" Property="Visibility" Value="Visible"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding Kind}" Value="{x:Static data:SearchHitKind.Note}">
+                    <Setter TargetName="glyphBox" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                    <Setter TargetName="glyphBox" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+                    <Setter TargetName="glyph" Property="Stroke" Value="{DynamicResource Accent}"/>
+                  </DataTrigger>
+                </DataTemplate.Triggers>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+
+          <!-- 空态：不是空白就完事——得说清楚搜的是什么、不含什么，
+               否则用户会以为"文件夹里的东西怎么搜不到"是 bug。 -->
+          <Border x:Name="SearchEmpty" Margin="16,10,16,8" Visibility="Collapsed">
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+              <TextBlock Text="未找到，搜索不含文件夹" FontSize="12.5"
+                         HorizontalAlignment="Center" Foreground="{DynamicResource Ink2}"/>
+              <TextBlock Text="能搜到的是：条目 · 组合 · 备忘标题与正文" FontSize="10.5"
+                         Margin="0,6,0,0" HorizontalAlignment="Center"
+                         Foreground="{DynamicResource Ink3}"/>
+            </StackPanel>
+          </Border>
+
+          <!-- 状态行：叠在列表底边之上，右 86 与主面板一样留给右下斜线 -->
+          <TextBlock x:Name="SearchStatus" VerticalAlignment="Bottom" Margin="16,0,86,10"
+                     FontSize="10.5" Foreground="{DynamicResource Ink3}"/>
+        </Grid>
+      </Border>
 
       <!-- ============================ 备忘录 · 列表 ============================
            与设置页同款：覆盖层，不进 NavStack、不写 state.json 的 Nav。
@@ -1012,7 +1155,13 @@
           <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto"
                         HorizontalScrollBarVisibility="Disabled"
                         Focusable="False" Margin="0,13,12,22" Padding="16,0,8,8">
-            <StackPanel>
+            <!-- 可聚焦：这是设置页的键盘落点。
+                 M4-P4 为了压掉焦点虚框，把上面的 ScrollViewer 设成 Focusable="False"、
+                 打开时又 Keyboard.ClearFocus()，两层叠加的结果是焦点无处可落——
+                 WPF 没有键盘事件的目标，改键永远卡在"按下新组合键…"、Esc 关设置页也失效。
+                 所以这里必须留一个可聚焦的落点，由 OpenSettings 主动把焦点交过来。
+                 焦点框不会因此复现：App 级已把 FocusVisualStyleKey 覆盖成空模板。 -->
+            <StackPanel x:Name="SettingsRoot" Focusable="True" FocusVisualStyle="{x:Null}">
               <!-- 密度原则（UI 手册 S7）：每行只讲一件事，能合并成一行的绝不拆三行。
                    主题色/纸张各压成一行三片、图标三档并成一行分段控件、锚点两行并成一行开关，
                    快捷键并入「呼出与停靠」-> 13 行 6 组收成 8 行 5 组，一屏放得下不用滚。 -->
@@ -1035,8 +1184,14 @@
                     <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
                             Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
                             VerticalAlignment="Center" Visibility="Collapsed">
-                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
-                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                      <!-- 必须给 Stretch=Uniform + 显式尺寸：这段勾的几何从 (3.6,4.6) 起步，
+                           不归一的话 Path 会按自己的坐标画，在 15px 圆球里被挤到右下角、
+                           半截压在描边上 —— 看起来就是一颗实心圆球（列表页 NoteCheck 的勾
+                           一直正常，正是因为它写了 Stretch + 尺寸）。
+                           15px 球 - 1.5px 描边 = 12px 内容区，9px 的勾四周各留 1.5px。 -->
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stretch="Uniform" Width="9" Height="9"
+                            Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
                     </Border>
                   </Grid>
                 </Border>
@@ -1055,8 +1210,14 @@
                     <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
                             Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
                             VerticalAlignment="Center" Visibility="Collapsed">
-                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
-                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                      <!-- 必须给 Stretch=Uniform + 显式尺寸：这段勾的几何从 (3.6,4.6) 起步，
+                           不归一的话 Path 会按自己的坐标画，在 15px 圆球里被挤到右下角、
+                           半截压在描边上 —— 看起来就是一颗实心圆球（列表页 NoteCheck 的勾
+                           一直正常，正是因为它写了 Stretch + 尺寸）。
+                           15px 球 - 1.5px 描边 = 12px 内容区，9px 的勾四周各留 1.5px。 -->
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stretch="Uniform" Width="9" Height="9"
+                            Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
                     </Border>
                   </Grid>
                 </Border>
@@ -1075,8 +1236,14 @@
                     <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
                             Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
                             VerticalAlignment="Center" Visibility="Collapsed">
-                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
-                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                      <!-- 必须给 Stretch=Uniform + 显式尺寸：这段勾的几何从 (3.6,4.6) 起步，
+                           不归一的话 Path 会按自己的坐标画，在 15px 圆球里被挤到右下角、
+                           半截压在描边上 —— 看起来就是一颗实心圆球（列表页 NoteCheck 的勾
+                           一直正常，正是因为它写了 Stretch + 尺寸）。
+                           15px 球 - 1.5px 描边 = 12px 内容区，9px 的勾四周各留 1.5px。 -->
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stretch="Uniform" Width="9" Height="9"
+                            Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
                     </Border>
                   </Grid>
                 </Border>
@@ -1100,8 +1267,14 @@
                     <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
                             Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
                             VerticalAlignment="Center" Visibility="Collapsed">
-                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
-                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                      <!-- 必须给 Stretch=Uniform + 显式尺寸：这段勾的几何从 (3.6,4.6) 起步，
+                           不归一的话 Path 会按自己的坐标画，在 15px 圆球里被挤到右下角、
+                           半截压在描边上 —— 看起来就是一颗实心圆球（列表页 NoteCheck 的勾
+                           一直正常，正是因为它写了 Stretch + 尺寸）。
+                           15px 球 - 1.5px 描边 = 12px 内容区，9px 的勾四周各留 1.5px。 -->
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stretch="Uniform" Width="9" Height="9"
+                            Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
                     </Border>
                   </Grid>
                 </Border>
@@ -1120,8 +1293,14 @@
                     <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
                             Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
                             VerticalAlignment="Center" Visibility="Collapsed">
-                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
-                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                      <!-- 必须给 Stretch=Uniform + 显式尺寸：这段勾的几何从 (3.6,4.6) 起步，
+                           不归一的话 Path 会按自己的坐标画，在 15px 圆球里被挤到右下角、
+                           半截压在描边上 —— 看起来就是一颗实心圆球（列表页 NoteCheck 的勾
+                           一直正常，正是因为它写了 Stretch + 尺寸）。
+                           15px 球 - 1.5px 描边 = 12px 内容区，9px 的勾四周各留 1.5px。 -->
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stretch="Uniform" Width="9" Height="9"
+                            Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
                     </Border>
                   </Grid>
                 </Border>
@@ -1140,8 +1319,14 @@
                     <Border Grid.Column="2" Tag="tick" Width="15" Height="15" CornerRadius="8" Margin="6,0,0,0"
                             Background="{DynamicResource Accent}" BorderBrush="{DynamicResource Accent}" BorderThickness="1.5"
                             VerticalAlignment="Center" Visibility="Collapsed">
-                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
-                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="2"/>
+                      <!-- 必须给 Stretch=Uniform + 显式尺寸：这段勾的几何从 (3.6,4.6) 起步，
+                           不归一的话 Path 会按自己的坐标画，在 15px 圆球里被挤到右下角、
+                           半截压在描边上 —— 看起来就是一颗实心圆球（列表页 NoteCheck 的勾
+                           一直正常，正是因为它写了 Stretch + 尺寸）。
+                           15px 球 - 1.5px 描边 = 12px 内容区，9px 的勾四周各留 1.5px。 -->
+                      <Path Data="M3.6,7.4 L6.2,10 L10.6,4.6" Stretch="Uniform" Width="9" Height="9"
+                            Stroke="{DynamicResource AccentOn}" StrokeThickness="1.8"
+                            StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
                     </Border>
                   </Grid>
                 </Border>
@@ -1179,7 +1364,11 @@
               <Border Style="{StaticResource OptionRow}" Margin="0,0,0,3">
                 <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                   <StackPanel Grid.Column="0">
-                    <TextBlock Text="图标大小" FontSize="12.5"/>
+                    <!-- 这一行是分段控件的容器，自己不带 Tag，所以永远轮不到 RefreshSettingVisuals
+                         的 SetInk 来上色 —— 不显式给色的话，Foreground 一路继承到窗口顶层，
+                         落到系统默认的纯黑。白天纸上看不出来，夜空黑底下就是一团看不清的黑字
+                         （其它选项行都靠 Tag 拿到 Ink，唯独它漏了）。 -->
+                    <TextBlock Text="图标大小" FontSize="12.5" Foreground="{DynamicResource Ink}"/>
                     <TextBlock Text="拉伸只重排列数，不改变图标尺寸" FontSize="11" Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
                   </StackPanel>
                   <Border Grid.Column="1" Padding="3" CornerRadius="9" Background="{DynamicResource Paper2}"
@@ -1244,8 +1433,29 @@
                   </Border>
                 </Grid>
               </Border>
+
+              <Border Style="{StaticResource OptionRow}" Tag="flag:hideonfullscreen">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0">
+                    <TextBlock Text="全屏应用时自动收起" FontSize="12.5"/>
+                    <TextBlock Text="游戏、视频等全屏时面板主动让位" FontSize="11" Foreground="{DynamicResource Ink3}" Margin="0,2,0,0"/>
+                  </StackPanel>
+                  <Border Grid.Column="1" x:Name="togFullscreen" Width="36" Height="20" CornerRadius="10"
+                          Background="{DynamicResource Rule}">
+                    <Ellipse x:Name="knobFullscreen" Width="16" Height="16" HorizontalAlignment="Left" Margin="2,0,0,0"
+                             Fill="{DynamicResource Paper}"/>
+                  </Border>
+                </Grid>
+              </Border>
             </StackPanel>
           </ScrollViewer>
+
+          <!-- 状态栏：设置页 RowSpan=5 把主面板的 StatusText 也盖住了，而改键成败、开关反馈
+               这些提示恰恰都发生在设置页里 —— 只写主状态栏等于没说。
+               备忘录两个覆盖层当年就是这个待遇（MemoStatus / MemoEditStatus），这里照同一套补一份：
+               同样的字号颜色、右 86 避开右下斜线、叠在滚动内容底边之上。 -->
+          <TextBlock x:Name="SettingsStatus" Grid.Row="2" VerticalAlignment="Bottom"
+                     Margin="16,0,86,10" FontSize="10.5" Foreground="{DynamicResource Ink3}"/>
         </Grid>
       </Border>
     </Grid>

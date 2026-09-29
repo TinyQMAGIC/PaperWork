@@ -32,7 +32,8 @@ public partial class PanelWindow
 
     private void InitMemo()
     {
-        MemoButton.Click += (_, _) => OpenMemo();
+        // 同上：备忘列表也是整块覆盖层，先进它就把搜索退掉，避免两层叠着
+        MemoButton.Click += (_, _) => { ExitSearch(); OpenMemo(); };
         MemoClose.Click += (_, _) => CloseMemo();
         MemoCrumbHome.Click += (_, _) => CloseMemo();
 
@@ -169,6 +170,9 @@ public partial class PanelWindow
             }
         }, danger: true));
 
+        // 首末项的悬停圆角要跟着菜单外弧走（UI 手册的菜单几何标准，三处菜单一致）
+        MarkMenuEdges(menu);
+
         menu.PlacementTarget = this;
         menu.Placement = PlacementMode.MousePoint;
         menu.IsOpen = true;
@@ -233,12 +237,14 @@ public partial class PanelWindow
         OpenEditor(_store.AddNote().Id);
     }
 
-    private void OpenEditor(int id)
+    /// <param name="back">退出来回哪。默认回备忘列表；从搜索进来时传 <see cref="MemoReturn.Search"/>。</param>
+    private void OpenEditor(int id, MemoReturn back = MemoReturn.List)
     {
         var n = _store.Note(id);
         if (n is null) return;
 
         _editingNoteId = id;
+        _memoReturn = back;
 
         // 给 Text 赋值会触发 TextChanged → PushEdit，但内容与存储一致时会提前返回，
         // 不会产生一次多余的落盘
@@ -262,7 +268,19 @@ public partial class PanelWindow
         _editingNoteId = 0;
         MemoEditPanel.Visibility = Visibility.Collapsed;
 
+        // 从哪来回哪去。搜索来的就回搜索，并且**重跑一次查询**——
+        // 内容刚改过，结果里的标题/片段可能是旧的。
+        if (_memoReturn == MemoReturn.Search && SearchPanel.Visibility == Visibility.Visible)
+        {
+            MemoPanel.Visibility = Visibility.Collapsed;
+            _memoReturn = MemoReturn.List;
+            RunSearch();
+            SearchBox.Focus();
+            return;
+        }
+
         // 回到列表：内容可能刚变过，顺带刷新一次
+        _memoReturn = MemoReturn.List;
         RenderMemoList();
         MemoPanel.Visibility = Visibility.Visible;
     }
@@ -275,6 +293,18 @@ public partial class PanelWindow
         _editingNoteId = 0;
 
         MemoEditPanel.Visibility = Visibility.Collapsed;
+
+        // 删除后同样按来源回落（删除走的不是 CloseEditor，所以这里要单独判一次）
+        if (_memoReturn == MemoReturn.Search && SearchPanel.Visibility == Visibility.Visible)
+        {
+            MemoPanel.Visibility = Visibility.Collapsed;
+            _memoReturn = MemoReturn.List;
+            RunSearch();
+            SearchBox.Focus();
+            return;
+        }
+
+        _memoReturn = MemoReturn.List;
         RenderMemoList();
         MemoPanel.Visibility = Visibility.Visible;
     }
