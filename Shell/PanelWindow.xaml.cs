@@ -65,6 +65,9 @@ public partial class PanelWindow : Window
 
     private string _query = string.Empty;
 
+    /// <summary>标题栏三个图标按钮的提示是否处于"呼出后暂停"状态。见 <see cref="ResetChromeHoverState"/>。</summary>
+    private bool _chromeTipsMuted;
+
     public IntPtr Handle { get; private set; }
 
     public bool IsPanelVisible { get; private set; }
@@ -131,6 +134,7 @@ public partial class PanelWindow : Window
         PreviewMouseRightButtonDown += OnRightDown;
         PreviewMouseLeftButtonDown += ReorderDown;
         PreviewMouseMove += ReorderMove;
+        PreviewMouseMove += OnChromeTipsMouseMove;   // 第一次移动就把标题栏提示放开（见 ResetChromeHoverState）
         PreviewMouseLeftButtonUp += ReorderUp;
         MouseDoubleClick += OnDoubleClick;
         PreviewKeyDown += OnKeyDown;
@@ -151,9 +155,9 @@ public partial class PanelWindow : Window
         // 搜索的接线全部在 InitSearch 里。初始态（点了搜索框还没打字）什么都不变：
         // 还是当前这一层的磁贴，不跳页、不改标题。
         InitSearch();
-        SearchBox.GotKeyboardFocus += (_, _) => SearchHint.Visibility = Visibility.Collapsed;
-        SearchBox.LostKeyboardFocus += (_, _) =>
-            SearchHint.Visibility = string.IsNullOrEmpty(SearchBox.Text) ? Visibility.Visible : Visibility.Collapsed;
+        // 焦点变化与文本变化共用一个刷新（判断条件见 UpdateSearchHint 的注释）
+        SearchBox.GotKeyboardFocus += (_, _) => UpdateSearchHint();
+        SearchBox.LostKeyboardFocus += (_, _) => UpdateSearchHint();
     }
 
     /// <summary>防抖后的目录变更。只重建当前这一层，不碰导航栈也不写盘。</summary>
@@ -219,6 +223,17 @@ public partial class PanelWindow : Window
         {
             handled = true;
             return IntPtr.Zero;
+        }
+
+        // 搜索框失焦：非客户区那一下 WPF 收不到鼠标事件。
+        //
+        // 「搜索栏上方那一带」就是 WindowChrome 的拖拽区（CaptionHeight=46），拉伸边框同理：
+        // 点在它们上面走的是 WM_NCLBUTTONDOWN，不会产生 PreviewMouseLeftButtonDown，
+        // 于是"点空白让搜索框失焦"覆盖不到这一块 —— 光标继续闪、占位文案也不回来。
+        // 这里补一刀，并且**不设 handled**：拖动窗口、拉伸边框照旧由系统处理。
+        if (msg == Native.WM_NCLBUTTONDOWN)
+        {
+            BlurSearchBox();
         }
 
         // Win11 原生菜单的 owner-draw 条目靠这四条消息画自己，消息发给 hwndOwner（就是我们）。
@@ -396,6 +411,57 @@ public partial class PanelWindow : Window
         // 这里原来每次呼出都要写一行 startup.log（含进程资源快照）。M5 删掉了：
         // 它跑在 §13.3 那条 P95 < 30ms 的关键路径上，而"每次呼出延迟"这种量
         // 只在调性能时才要看，长驻写盘不值得。真要量的时候临时加回来即可。
+
+        // 标题栏按钮的提示不能"自己冒出来"：见下面 ResetChromeHoverState 的说明
+        ResetChromeHoverState();
+    }
+
+    // ---------------------------------------------- 标题栏按钮的自发提示（A + B，2026-09-29）
+
+    /// <summary>
+    /// 呼出面板之后，把标题栏三个图标按钮的"悬停态"重置掉：<b>停提示 + 把焦点从它们身上挪开</b>。
+    ///
+    /// 为什么要这么做，两条路都实测过：
+    ///
+    /// <b>① 鼠标那条（A）</b>：面板是"以光标为中心"出现的（D22），贴边时被夹进屏幕工作区，
+    /// 于是**光标可能正好压在 X / 齿轮 / 备忘按钮上** —— 没人动鼠标，WPF 却按"悬停"处理，
+    /// 400ms（<c>ToolTipService.InitialShowDelay</c>）后就把「关闭」弹出来。
+    /// 实测：光标停在屏幕右上角 (2520,20) 呼出 → 弹「关闭」；停在 (2500,30) → 弹「设置」。
+    ///
+    /// <b>② 焦点那条（B）</b>：面板是 <c>Hide()</c> 收起、不是销毁，视觉树和键盘焦点都留着；
+    /// 而这三个按钮又是可视树里最靠前的可聚焦元素，激活时 WPF 也优先把焦点给它们。
+    /// WPF 对"获得键盘焦点的元素"同样会弹提示（<c>OpenSettings</c> 里那段注释是同一个坑）。
+    ///
+    /// A 的做法是"停到第一次鼠标移动为止"，而不是停固定时长：人真想看提示必然先移动鼠标过去，
+    /// 所以不会误伤正常使用，也不需要计时器。
+    /// </summary>
+    private void ResetChromeHoverState()
+    {
+        // A：先停掉提示，等鼠标动过再放开
+        SetChromeTips(enabled: false);
+
+        // B：把焦点从这三个按钮上挪走。只在焦点确实是它们（或压根没有焦点）时才动 ——
+        //    别去抢搜索框这种本来就该持有焦点的元素。
+        FrameworkElement? focused = Keyboard.FocusedElement as FrameworkElement;
+        if (focused is null || focused == MemoButton || focused == SettingsButton || focused == HideButton)
+        {
+            // 必须交给一个真正可聚焦的元素：设置页那段注释记过一次教训 ——
+            // "清完焦点不交出去"会让 WPF 没有键盘事件的目标，Esc / 改键采集全部失效。
+            Keyboard.Focus(MainRoot);
+        }
+    }
+
+    /// <summary>第一次鼠标移动 = 用户真的在操作鼠标，把提示放开。</summary>
+    private void OnChromeTipsMouseMove(object sender, MouseEventArgs e) => SetChromeTips(enabled: true);
+
+    private void SetChromeTips(bool enabled)
+    {
+        if (_chromeTipsMuted == !enabled) return;   // 状态没变就别重复设，鼠标移动是高频事件
+
+        _chromeTipsMuted = !enabled;
+        ToolTipService.SetIsEnabled(MemoButton, enabled);
+        ToolTipService.SetIsEnabled(SettingsButton, enabled);
+        ToolTipService.SetIsEnabled(HideButton, enabled);
     }
 
     /// <summary>

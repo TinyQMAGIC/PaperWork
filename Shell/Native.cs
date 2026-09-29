@@ -41,6 +41,12 @@ internal static class Native
     /// <summary>非客户区双击。标题栏双击最大化走的就是它（wParam = HTCAPTION）。</summary>
     public const int WM_NCLBUTTONDBLCLK = 0x00A3;
 
+    /// <summary>非客户区左键按下。标题栏拖拽区、拉伸边框都走它（wParam = 命中区域）。</summary>
+    public const int WM_NCLBUTTONDOWN = 0x00A1;
+
+    /// <summary>命中区域：标题栏。WindowChrome.CaptionHeight 那一带。</summary>
+    public const int HTCAPTION = 2;
+
     // ---------------- 热键 ----------------
     public const uint MOD_ALT = 0x1;
     public const uint MOD_CONTROL = 0x2;

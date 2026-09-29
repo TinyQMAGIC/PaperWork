@@ -685,7 +685,10 @@
 
   <Border Background="{DynamicResource Paper}" BorderBrush="{DynamicResource Edge}"
           BorderThickness="1" CornerRadius="{StaticResource PanelRadius}" ClipToBounds="True">
-    <Grid>
+    <!-- 可聚焦：主面板的键盘落点。呼出时把焦点交给它，而不是让它落到标题栏那三个按钮上
+         （后者会连带弹出它们的提示，见 ResetChromeHoverState 的注释）。
+         焦点框不会因此出现：App 级已把 FocusVisualStyleKey 覆盖成空模板。 -->
+    <Grid x:Name="MainRoot" Focusable="True">
       <Grid.RowDefinitions>
         <RowDefinition Height="46"/>
         <RowDefinition Height="Auto"/>

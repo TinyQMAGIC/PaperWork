@@ -54,6 +54,7 @@ public partial class PanelWindow
         {
             _query = SearchBox.Text?.Trim() ?? string.Empty;
             QueueSearch();
+            UpdateSearchHint();      // 清空之后占位文案要立刻回来，见下面那段注释
         };
 
         // 键盘全在搜索框这一层处理：焦点始终留在框里（列表不可聚焦），
@@ -65,6 +66,64 @@ public partial class PanelWindow
 
         _searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); RunSearch(); };
+
+        // 点搜索框以外的地方 → 把焦点从框里移开（光标不再闪、占位文案回来）
+        PreviewMouseLeftButtonDown += OnSearchBlurClick;
+    }
+
+    /// <summary>
+    /// 点搜索框<b>以外</b>的地方就把焦点从搜索框上移开：输入光标消失、「搜索…」占位文案回来，
+    /// 也就是回到"点搜索框之前"的样子。
+    ///
+    /// 为什么要单独做这一步：面板背景是 Border / Grid，它们<b>不可聚焦</b>，点上去 WPF
+    /// 没有理由把焦点从 TextBox 拿走 —— 于是光标一直闪。这里主动把焦点交给主面板根容器
+    /// （和呼出时用的是同一个落点），而不是 <c>Keyboard.ClearFocus()</c>：
+    /// 焦点必须有个真实去处，否则 WPF 连键盘事件都没有目标（设置页那段注释记过这个教训）。
+    ///
+    /// 刻意<b>不设</b> <c>e.Handled</c>：这一下点击还得照常交给磁贴 / 结果行 / 拖拽那些处理器。
+    /// </summary>
+    private void OnSearchBlurClick(object sender, MouseButtonEventArgs e)
+    {
+        if (!SearchBox.IsKeyboardFocusWithin) return;      // 框本来就没焦点，什么都不用做
+        if (IsInsideTextInput(e.OriginalSource)) return;   // 点回搜索框（或别的输入框）别抢
+
+        BlurSearchBox();
+    }
+
+    /// <summary>
+    /// 把焦点从搜索框交还主面板根容器。两条路共用它：
+    /// ① 客户区点击（<see cref="OnSearchBlurClick"/>）；
+    /// ② <b>非客户区</b>点击 —— 标题栏拖拽区（CaptionHeight=46）与拉伸边框走 WM_NCLBUTTONDOWN，
+    ///    压根不产生 WPF 鼠标事件，所以由 <c>PanelWindow.WndProc</c> 调这里（见那边的注释）。
+    /// </summary>
+    internal void BlurSearchBox()
+    {
+        if (SearchBox.IsKeyboardFocusWithin) Keyboard.Focus(MainRoot);
+    }
+
+    /// <summary>
+    /// 占位文案「搜索…」只在<b>框里没字、且没有键盘焦点</b>时显示。
+    ///
+    /// 不能只在 <c>GotKeyboardFocus</c> / <c>LostKeyboardFocus</c> 里算一次：
+    /// "先失焦、再被清空"是真实存在的一条路（点空白退出搜索就是它）——
+    /// 失焦那一刻框里还有字，于是判成"不显示"；紧接着文本被清空，却没人再算一遍，
+    /// 结果是一个空框、没有提示、也没有光标，看着像坏了。所以文本一变就重算。
+    /// </summary>
+    private void UpdateSearchHint() =>
+        SearchHint.Visibility = !SearchBox.IsKeyboardFocusWithin && string.IsNullOrEmpty(SearchBox.Text)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    /// <summary>沿着上层找，判断这一下有没有落在文本输入上 —— 命中就不该抢它的焦点。</summary>
+    private static bool IsInsideTextInput(object source)
+    {
+        DependencyObject? node = source as DependencyObject;
+        while (node is not null)
+        {
+            if (node is TextBoxBase) return true;
+            node = ParentOf(node);
+        }
+        return false;
     }
 
     private void QueueSearch()
