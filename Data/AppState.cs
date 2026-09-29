@@ -136,6 +136,14 @@ public sealed class AppSettings
     public bool CloseToTray { get; set; } = true;
     /// <summary>组合磁贴右上角的"收纳了几项"角标。<c>false</c> 时只画磁贴不画数。</summary>
     public bool ShowGroupBadge { get; set; } = true;
+
+    /// <summary>
+    /// 前台进入「铺满整块显示器」的应用时，是否自动收起面板（D28）。
+    /// 默认<b>关</b>：全屏的 IDE / 远程桌面等「工作型全屏」会被这条误伤，
+    /// 而 D5 的精神是"藏不藏由用户按热键决定"。勾上即 M4-P1 的老行为。
+    /// 旧数据里没有这个字段，反序列化落到默认值，正好就是"不自动收起"。
+    /// </summary>
+    public bool HideOnFullscreen { get; set; } = false;
     /// <summary>人类可读形式，如 "Ctrl+Alt+D"。实际注册用启动时解析的结果。</summary>
     public string Hotkey { get; set; } = "Ctrl+Alt+D";
 }

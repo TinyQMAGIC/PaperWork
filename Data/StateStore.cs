@@ -21,8 +21,9 @@ public sealed class StateStore
     /// </summary>
     public const int CurrentVersion = 2;
 
-    private static readonly string StoreDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Paperwork");
+    // 走 AppPaths，不要再在这里写死 AppData\Paperwork：
+    // 数据目录可能是 exe 同级的 UserData，也可能是回退后的 AppData，由 AppPaths 一处决定。
+    private static readonly string StoreDir = AppPaths.DataDir;
 
     private static readonly string FilePath = Path.Combine(StoreDir, "state.json");
 

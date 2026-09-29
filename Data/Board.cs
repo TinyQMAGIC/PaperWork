@@ -130,13 +130,9 @@ public sealed class TileVm : INotifyPropertyChanged
 
     public bool HasIcon => _icon is not null;
 
-    private bool _highlighted;
-    /// <summary>搜索命中时的高亮。</summary>
-    public bool Highlighted
-    {
-        get => _highlighted;
-        set { if (_highlighted == value) return; _highlighted = value; OnChanged(); }
-    }
+    // 原先这里有个 Highlighted（搜索命中时给整块磁贴换底色）。
+    // 搜索改成全局之后不再按查询过滤磁贴，它没人用了 —— 直接删，不留死代码。
+    // 片段级高亮由 SearchHit 的 Prefix / Match / Suffix 三段承担，那是另一回事。
 
     private bool _selected;
     public bool Selected
@@ -346,7 +342,8 @@ public static class BoardBuilder
         };
     }
 
-    private static string DeriveName(string path, bool isDir)
+    /// <summary>从路径推导显示名。internal：重命名对话框要用同一套推导（面板显示什么就预填什么）。</summary>
+    internal static string DeriveName(string path, bool isDir)
     {
         if (isDir)
         {
