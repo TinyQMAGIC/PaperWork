@@ -227,27 +227,33 @@
       </Setter>
     </Style>
 
-    <!-- 空态那块可点的虚线提示区（自己的样式，不复用 NoteCard：它没有内容，也不该有底色） -->
+    <!-- 空态那块可点的虚线提示区（自己的样式，不复用 NoteCard：它没有内容，也不该有底色）。
+         描边**不在这里**：WPF 的 Border 画不出虚线，所以外框由内容层那一个 Rectangle 提供
+         （见 MemoEmpty）。这里一旦再给 BorderBrush/BorderThickness，就会变成
+         "实线圆角框 + 里面一圈虚线"的两条线 —— 实机被用户当场指出过。
+         Padding 也不在这里：虚线要贴外框边缘（顶替旧实线），而 Padding 会把内容（连同
+         虚线）往内推 24px，虚线就退成"实线套虚线"。间距由内容层自己负责。 -->
     <Style x:Key="NoteEmpty" TargetType="Button">
       <Setter Property="Background" Value="Transparent"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
-      <Setter Property="BorderThickness" Value="1.5"/>
-      <Setter Property="Padding" Value="16,24,16,24"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="bd" Background="{TemplateBinding Background}"
-                    BorderBrush="{TemplateBinding BorderBrush}"
-                    BorderThickness="{TemplateBinding BorderThickness}"
-                    CornerRadius="14" Padding="{TemplateBinding Padding}">
-              <ContentPresenter HorizontalAlignment="Center"/>
+            <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="14">
+              <!-- 双向拉伸都不能省，这两条是三轮实机量出来的：
+                   VerticalAlignment 默认拉伸 → 按钮处在 ScrollViewer 里，空态框会被拉成
+                   "从列表顶画到面板底"的一整条（实测 611x409，本该约 138px 高）；
+                   HorizontalAlignment 默认 Center → 内容不铺满按钮宽度，虚线框缩成
+                   "包住图标和文字的小方框"（实测 128x188）。
+                   改回 Center 之后框会以内容尺寸居中，和"整块可点"的语义对不上。 -->
+              <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
             </Border>
             <ControlTemplate.Triggers>
+              <!-- 悬停只改底色：描边（虚线）的颜色由 Rectangle 自己的样式管，
+                   这里再碰 BorderBrush 就又会长出第二条线。 -->
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="bd" Property="Background" Value="{DynamicResource AccentSoft}"/>
-                <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -472,21 +478,46 @@
                       Background="{DynamicResource Paper2}" BorderBrush="{DynamicResource Rule}"
                       SnapsToDevicePixels="True">
                 <Grid>
-                  <!-- 选中态的内环（手册 §5：inset 1.5px AccentLine）。Border 画不出"框内再一圈"，
-                       所以单独一层 Rectangle 垫在内容下面、底色上面，和 CSS 的 inset box-shadow 同位。 -->
-                  <Rectangle x:Name="selRing" Visibility="Collapsed" IsHitTestVisible="False"
-                             Margin="1" RadiusX="10" RadiusY="10"
-                             Stroke="{DynamicResource AccentLine}" StrokeThickness="1.5"/>
-                  <!-- 失效态的虚线框（§5：1px dashed Ink3）。Border 不支持虚线描边，同 selRing 垫一层。 -->
+                  <!-- 失效态的虚线框（§5：1px dashed Ink3）。Border 不支持虚线描边，
+                       所以单独垫一层 Rectangle（和 CSS 的 inset box-shadow 同位）。
+                       原先这里还有一层"选中态内环" selRing —— 选中态改成 S1（只留整卡淡底，
+                       内圈一律不动）之后没人再显示它，按"不留死代码"删掉。 -->
                   <Rectangle x:Name="deadRing" Visibility="Collapsed" IsHitTestVisible="False"
                              Margin="1" RadiusX="10" RadiusY="10"
                              Stroke="{DynamicResource Ink3}" StrokeThickness="1" StrokeDashArray="2,2"/>
 
-                  <Image x:Name="art" Stretch="Uniform" Visibility="Collapsed"
-                         RenderOptions.BitmapScalingMode="HighQuality"
-                         Source="{Binding Icon}"
-                         Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"
-                         Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"/>
+                  <!-- 落点提示的两圈环，同样垫一层、<b>不碰 BorderThickness</b>：
+                       改厚度会让卡片尺寸跳 2px，而拖拽判定天天在读这块磁贴的位置 ——
+                       尺寸一跳，判定圆就跟着动，这正是"吸附时抽搐"的反馈环（F 方案）。
+                       两档粗细必须分得开（手册 §5 硬约束②）：并入 1.5 / 新建组合 2.5。
+                       2026-09-30 第二次调：原 2 / 3 偏重 —— 自从让贴片边与 chip 边
+                       在提示态全部让位之后，这圈环成了**唯一的信号**，一个人扛下了全部视觉重量。
+                       只减细（颜色仍是实色主题色，不压透明度）。 -->
+                  <Rectangle x:Name="dropRing" Visibility="Collapsed" IsHitTestVisible="False"
+                             Margin="1" RadiusX="10" RadiusY="10"
+                             Stroke="{DynamicResource Accent}" StrokeThickness="1.5"/>
+                  <Rectangle x:Name="mergeRing" Visibility="Collapsed" IsHitTestVisible="False"
+                             Margin="1" RadiusX="10" RadiusY="10"
+                             Stroke="{DynamicResource Accent}" StrokeThickness="2.5"/>
+
+                  <!-- 真图标（Shell / 自定义）：B 方案 —— 贴片只占图标格 80%，裁成圆角 + 发丝描边。
+                       用 Rectangle 而不是 Border + Image：WPF 的 Border **不裁子元素的角**，
+                       满铺时图标的方角会骑在圆角外；Rectangle 的 Fill 走它自己的圆角几何，
+                       天然裁掉四角，顺带省掉 OpacityMask / 在代码里算 Clip 那一套。
+                       尺寸也不能再写死 IconSize×IconSize：box 有 1px 描边、内容区只有 IconSize−2，
+                       满铺的图底边必然被裁 2px（2026-09-30 修）。 -->
+                  <Rectangle x:Name="art" Visibility="Collapsed" IsHitTestVisible="False"
+                             RenderOptions.BitmapScalingMode="HighQuality"
+                             SnapsToDevicePixels="True"
+                             Stroke="{DynamicResource Rule}" StrokeThickness="1"
+                             Width="{Binding ArtSize, RelativeSource={RelativeSource AncestorType=Window}}"
+                             Height="{Binding ArtSize, RelativeSource={RelativeSource AncestorType=Window}}"
+                             RadiusX="{Binding ArtRadius, RelativeSource={RelativeSource AncestorType=Window}}"
+                             RadiusY="{Binding ArtRadius, RelativeSource={RelativeSource AncestorType=Window}}">
+                    <Rectangle.Fill>
+                      <ImageBrush ImageSource="{Binding Icon}" Stretch="Uniform"/>
+                    </Rectangle.Fill>
+                  </Rectangle>
 
                   <TextBlock x:Name="glyphText" Text="{Binding DisplayGlyph}"
                              Visibility="{Binding HasGlyphText, Converter={StaticResource BoolVis}}"
@@ -522,6 +553,61 @@
                    换图标档位时两者一起缩放，不会出现圈和框错半像素 -->
               <Rectangle x:Name="ghost" Style="{StaticResource GhostRing}"
                          Margin="0,4,0,0" Visibility="Collapsed"/>
+
+              <!-- 收纳角标（design/badge-corner.html 的 P2 位置 + design/badge-size.html 的 S1 尺寸）。
+                   位置：圆心落在 box 右上角 R11 的 45° 对角线上，探出量 e = +2 ——
+                   即右缘比 box 右缘外推 2px、顶比 box 顶上抬 2px，所以 Margin 是负的。
+                   挂在这里（图标格）而不是磁贴外层 Grid：外层 Grid 的宽度跟着标签
+                   长短浮动，角标会跟着漂，长标签上能飞出去十几像素；图标格是固定的
+                   IconSize × IconSize，e 才是定值。
+                   探出之后圆点同时压在 Paper 与 Paper2 两种底色上，所以加 1.5px
+                   Paper2 描边把两色隔开（描边取自纸张，守 D15）。
+
+                   尺寸按图标格的比例分档（17/42 ≈ 40.5%，与"图形 = 格子 × 50%"同一条规矩）：
+                   32→13 / 42→17 / 56→23，字号同步 25%（8 / 10.5 / 14），圆角 = 半径。
+                   写死 15 会在三档下变成 47%/36%/27% 漂移——正是"大中小下大小不一致"那个毛病。
+                   描边恒定 1.5 不随档缩放（同手册：格子与图形缩放、描边不缩放）。
+
+                   两个实现上的坑：
+                   ① 尺寸必须写在 Style 的 Setter 里，不能写在元素上——本地值优先级高于
+                      Style 的 Trigger，写在元素上触发器改不动。
+                   ② 三档数值全取整数：窗口开了布局取整，2.5 这类小数会被舍掉。 -->
+              <Border x:Name="badge" Visibility="{Binding HasCount, Converter={StaticResource BoolVis}}"
+                      HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,2,-2,0"
+                      Padding="3,0,3,0"
+                      Background="{DynamicResource Accent}"
+                      BorderBrush="{DynamicResource Paper2}" BorderThickness="1.5"
+                      SnapsToDevicePixels="True" UseLayoutRounding="True">
+                <Border.Style>
+                  <Style TargetType="Border">
+                    <!-- MinWidth（不是 Width）：两位数/三位数时角标自己拉宽成胶囊 -->
+                    <Setter Property="MinWidth" Value="17"/>
+                    <Setter Property="Height" Value="17"/>
+                    <Setter Property="CornerRadius" Value="9"/>
+                    <Setter Property="TextElement.FontSize" Value="10.5"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}" Value="32">
+                        <Setter Property="MinWidth" Value="13"/>
+                        <Setter Property="Height" Value="13"/>
+                        <Setter Property="CornerRadius" Value="7"/>
+                        <Setter Property="TextElement.FontSize" Value="8"/>
+                      </DataTrigger>
+                      <DataTrigger Binding="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}" Value="56">
+                        <Setter Property="MinWidth" Value="23"/>
+                        <Setter Property="Height" Value="23"/>
+                        <Setter Property="CornerRadius" Value="12"/>
+                        <Setter Property="TextElement.FontSize" Value="14"/>
+                      </DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding Count}" FontWeight="SemiBold"
+                           Foreground="{DynamicResource AccentOn}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           TextAlignment="Center"
+                           LineStackingStrategy="BlockLineHeight"
+                           LineHeight="{Binding FontSize, RelativeSource={RelativeSource Self}}"/>
+              </Border>
             </Grid>
 
             <TextBlock x:Name="label" Text="{Binding Label}" Margin="2,6,2,0"
@@ -530,17 +616,9 @@
                        MaxHeight="30" TextTrimming="CharacterEllipsis"/>
           </StackPanel>
 
-          <Border x:Name="badge" Visibility="{Binding HasCount, Converter={StaticResource BoolVis}}"
-                  HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,3,4,0"
-                  MinWidth="15" Height="15" CornerRadius="8" Padding="4,0,4,0"
-                  Background="{DynamicResource Accent}">
-            <TextBlock Text="{Binding Count}" FontSize="9.5" FontWeight="SemiBold"
-                       Foreground="{DynamicResource AccentOn}" HorizontalAlignment="Center"
-                       VerticalAlignment="Center"/>
-          </Border>
-
           <!-- 失效标记（§4.6/§5）：Ink3 底 + Paper 文字的 15px 圆 +「!」，与收纳角标同位但互斥
-               （组合磁贴 EntryId 为 null 不会失效，失效磁贴也不会有收纳数）。 -->
+               （组合磁贴 EntryId 为 null 不会失效，失效磁贴也不会有收纳数）。
+               收纳角标已经移到图标格里（见上面 x:Name="badge"），这里只剩失效标记。 -->
           <Border x:Name="deadBadge" Visibility="Collapsed"
                   HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,3,4,0"
                   Width="15" Height="15" CornerRadius="8"
@@ -608,12 +686,13 @@
           <Setter TargetName="root" Property="IsHitTestVisible" Value="False"/>
         </DataTrigger>
 
-        <!-- 真实图标到达后，底框与书签凸口让位，避免"色块套图标"的双层感。
+        <!-- 真图标到了就显示贴片。**纸卡（box）不再让位** —— B 方案里贴片只占 80%，
+             纸卡是它底下那层"画框"，藏起来反而和线稿磁贴不是同一种画法了。
+             （原来把底和描边设成 Transparent，是为了避免"色块套图标"的双层感，
+               那是满铺时代的说法；现在贴片自己带发丝描边，不会糊成一团。）
              放在 folder/group 触发器之后，靠顺序覆盖。 -->
         <DataTrigger Binding="{Binding HasIcon}" Value="True">
           <Setter TargetName="art" Property="Visibility" Value="Visible"/>
-          <Setter TargetName="box" Property="Background" Value="Transparent"/>
-          <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
         </DataTrigger>
 
         <!-- 文件夹必须排在 HasIcon **之后**：文件类一律用预设图形、不抢真图标（UI 手册 §6 的替代范围）。
@@ -626,11 +705,13 @@
           <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
         </DataTrigger>
 
+        <!-- 选中态 = S1（design/selection-proposals.html）：<b>只留整卡淡底</b>。
+             原来还叠了 chip 实线主题框 + 线稿变色 + chip 内圈环，四层糊在一起；
+             而且"淡底 + chip 主题框"这套组合是「拖放入组落点 / 新建组合 / 悬停收尾格」共用的，
+             选中态不该再占一遍。现在 chip 描边、线稿颜色、内圈环<b>全部保持原样</b>，
+             选中只由"这张卡被垫起来一层淡色"来表达。 -->
         <DataTrigger Binding="{Binding Selected}" Value="True">
           <Setter TargetName="root" Property="Background" Value="{DynamicResource AccentSoft}"/>
-          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
-          <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
-          <Setter TargetName="selRing" Property="Visibility" Value="Visible"/>
         </DataTrigger>
 
         <!-- 拖拽排序：被拖的那块压暗。落点指示就是"磁贴自己在实时挪动"，
@@ -642,8 +723,16 @@
         </DataTrigger>
         <DataTrigger Binding="{Binding DropHint}" Value="True">
           <Setter TargetName="root" Property="Background" Value="{DynamicResource AccentSoft}"/>
-          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
-          <Setter TargetName="box" Property="BorderThickness" Value="2"/>
+          <!-- 落点提示**只由这一圈环表达** —— 底下那两层通用描边在提示态一律让位：
+                 · art  的 1px Rule 贴片边
+                 · box  的 1px Rule chip 边 + Paper2 底
+               不让位就是"边上有好几圈框"（2026-09-30 用户截图反馈）：
+               贴片边 + chip 边 + 这圈环 + 放大后的间距，读起来像四个方框套着。
+               合并态要说的只有"这两块要并在一起"，此时"磁贴边框"本身是干扰信息。 -->
+          <Setter TargetName="art" Property="Stroke" Value="Transparent"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+          <Setter TargetName="box" Property="Background" Value="Transparent"/>
+          <Setter TargetName="dropRing" Property="Visibility" Value="Visible"/>
           <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
         </DataTrigger>
 
@@ -655,13 +744,19 @@
           <Setter TargetName="root" Property="RenderTransformOrigin" Value="0.5,0.4"/>
           <Setter TargetName="root" Property="RenderTransform">
             <Setter.Value>
-              <ScaleTransform ScaleX="1.1" ScaleY="1.1"/>
+              <!-- 1.1 → 1.06：放大是为了"鼓起来"，但每放大一点，几层描边之间的间距就散开一点。
+                   收到 1.06 仍然看得出鼓起，又不至于把线散成"好几个框"。 -->
+              <ScaleTransform ScaleX="1.06" ScaleY="1.06"/>
             </Setter.Value>
           </Setter>
-          <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
-          <!-- 设计稿写 2.5，但窗口开了布局取整，2.5 会被舍入成 2——和入组落点的 2px 完全一样，
-               破的是手册 §5 硬约束②（两档落点必须分得开）。取能活过取整的最小整数 3。 -->
-          <Setter TargetName="box" Property="BorderThickness" Value="3"/>
+          <!-- 同 DropHint：贴片边与 chip 边在提示态一律让位，只留这一圈环。
+               粗细 2.5（并入 1.5）—— 画在覆盖环上而不是 BorderThickness 上：
+               后者一改尺寸就跳，而且会被布局取整吃掉小数（当初就是因此从 2.5 退到 3 的）。
+               StrokeThickness 是渲染属性，2.5 就是 2.5。 -->
+          <Setter TargetName="art" Property="Stroke" Value="Transparent"/>
+          <Setter TargetName="box" Property="BorderBrush" Value="Transparent"/>
+          <Setter TargetName="box" Property="Background" Value="Transparent"/>
+          <Setter TargetName="mergeRing" Property="Visibility" Value="Visible"/>
           <Setter TargetName="presetArt" Property="Stroke" Value="{DynamicResource Accent}"/>
         </DataTrigger>
 
@@ -781,9 +876,31 @@
 
       <Border x:Name="EmptyHint" Grid.Row="3" Margin="16,10,16,8" Visibility="Collapsed">
         <Grid>
-          <Rectangle Stroke="{DynamicResource Rule}" StrokeThickness="1.5"
+          <!-- 外圈虚线：Rule → AccentLine。空态该说的是"这里可以放东西"，而 Rule 是纸张的
+               "分隔线"色，读起来只是"这里空着" —— "单调"就是从这儿来的。
+               AccentLine 与拖放占位格、磁贴边框是同一支笔；DynamicResource 跟着主题走（D15），
+               换纸换色自动跟随，一行主题分支都不用写。 -->
+          <Rectangle Stroke="{DynamicResource AccentLine}" StrokeThickness="1.5"
                      StrokeDashArray="5 4" RadiusX="14" RadiusY="14"/>
           <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+            <!-- 拖放占位那颗图标搬进来（design/empty-state-proposals.html 的 B 版）：
+                 箭头住在自己的小虚线底座里，与外圈同色同心 —— 拖之前看到的，
+                 就是拖的时候会出现的那一格，语义不必解释。
+                 底座必须是 Rectangle：WPF 的 Border 画不出虚线（占位格那边踩过这个坑）。
+                 虚线节奏照抄 GhostRing（1.67 1.67 = 2.5 段 / 2.5 空 @1.5 笔宽），
+                 两处是同一种虚线；圆角 14 = 图标座圆角 11 按 42→56 放大后减半个笔宽，
+                 和 GhostRing 同一条算法。
+                 IsHitTestVisible=False：落在这上面等于落在面板空白处（与占位格同一个理由）。 -->
+            <Grid Width="56" Height="56" HorizontalAlignment="Center" Margin="0,0,0,10"
+                  IsHitTestVisible="False">
+              <Rectangle Stroke="{DynamicResource AccentLine}" StrokeThickness="1.5"
+                         StrokeDashArray="1.67 1.67" RadiusX="14" RadiusY="14"
+                         SnapsToDevicePixels="True"/>
+              <Path x:Name="EmptyIcon" Width="26" Height="26" Stretch="Uniform"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Stroke="{DynamicResource Accent}" StrokeThickness="1.6"
+                    StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+            </Grid>
             <TextBlock x:Name="EmptyTitle" Text="把任意文件拖进来" FontSize="12.5"
                        HorizontalAlignment="Center" Foreground="{DynamicResource Ink2}"/>
             <TextBlock x:Name="EmptySub" Text="程序、快捷方式、文件夹、文档、图片、压缩包…"
@@ -985,7 +1102,9 @@
                  上 6 = 与发丝线的空档；右 12 = 避开 ResizeBorderThickness=10 的拉伸热区；
                  下 22 = 圆角半径，滑块底端与弧的起点齐平，不画进 R 角。
                padding：右 14 → 卡片右缘离滚动条约 7px；下 4 → 最后一张卡离面板底 26，
-               刚好让开状态栏文字（占 bottom 10–24），不多留空白。 -->
+               刚好让开状态栏文字（占 bottom 10–24），不多留空白。
+               注意：这套非对称的内缩**只作用于卡片**。空态（MemoEmpty）已经挪到 ScrollViewer
+               外面自己给 Margin —— 它原来跟着一起偏，左右差 10px。 -->
           <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto"
                         HorizontalScrollBarVisibility="Disabled" Focusable="False"
                         Margin="0,6,12,22" Padding="16,0,14,4">
@@ -999,10 +1118,55 @@
                 </ItemsControl.ItemTemplate>
               </ItemsControl>
 
-              <!-- 空态：整块可点（与右下角 FAB 等价的入口） -->
-              <Button x:Name="MemoEmpty" Style="{StaticResource NoteEmpty}" HorizontalAlignment="Stretch">
+            </StackPanel>
+          </ScrollViewer>
+
+          <!-- 空态：整块可点（与右下角 FAB 等价的入口）。
+               **不放在 ScrollViewer 里** —— 2026-09-30 改的：
+               ScrollViewer 的 Margin(0,6,12,22) + Padding(16,0,14,4) 让里面的东西
+               左 16 / 右 26，空态跟着一起偏，肉眼一眼看出"左右不对等"。
+               空态本来不需要滚动，挪出来自己给 Margin，对称就是结构上成立的，
+               不用靠负 margin 去凑；左右 16 与主面板空态 EmptyHint 同一条基准线。
+               外框是虚线，**贴在外框边缘、顶替原来的实线**（不是"实线套虚线"）：
+               虚线规格照抄主面板空态 EmptyHint（5 4 @1.5 笔宽 = 7.5px 段 / 6px 空），
+               所以同一个应用里"整块可点的空态框"只有一种画法。
+               必须用 Rectangle：WPF 的 Border 画不出虚线（收尾格、EmptyHint 都踩过）。
+               RadiusX 13.25 = 外边圆角 14 − 半个笔宽（Rectangle 的圆角量的是描边中心线，
+               Border 的 CornerRadius 量的是外缘）。
+               **Rectangle 绝不能写 Width/Height**（三轮改法才定下来）：
+                 ① 只写 Stretch="Fill" 且让它参与测量 → 期望尺寸退回 0，虚线缩成
+                    "包住图标和文字的小方框"（实测 128×188）；
+                 ② 改成 Width/Height 绑外层 Border → 循环依赖，整块塌成"从列表顶画到
+                    面板底"的一整条（实测 611×409）；
+                 ③ 显式给了 Width/Height 之后**虚线静默变实线**（同一份 StrokeDashArray
+                    在 EmptyHint 上仍是虚线，区别只有"有没有显式尺寸"）。
+               所以尺寸由模板里那个双向拉伸的 ContentPresenter 交给它，Rectangle 只负责铺满。
+               悬停变色也归 Rectangle：它的样式用 DataTrigger 绑祖先 Button.IsMouseOver，
+               Stroke 在 AccentLine ⇄ Accent 之间切（底色仍由 NoteEmpty 的模板触发器管）。 -->
+          <Button x:Name="MemoEmpty" Grid.Row="2" Style="{StaticResource NoteEmpty}"
+                  HorizontalAlignment="Stretch" VerticalAlignment="Top" Margin="16,6,16,0">
+            <Grid>
+              <Rectangle StrokeThickness="1.5"
+                         StrokeDashArray="5 4" RadiusX="13.25" RadiusY="13.25"
+                         Stretch="Fill" IsHitTestVisible="False">
+                <Rectangle.Style>
+                  <Style TargetType="Rectangle">
+                    <Setter Property="Stroke" Value="{DynamicResource AccentLine}"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True">
+                        <Setter Property="Stroke" Value="{DynamicResource Accent}"/>
+                      </DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Rectangle.Style>
+              </Rectangle>
+              <!-- 内容留白归这里管（NoteEmpty 自己不带 Padding：虚线要贴外框边缘，
+                   Padding 会把虚线一起推进来）。
+                   上下 28/26、图标↔标题 12、两行间 6 —— 2026-09-30 的空态改版
+                   （原来 24/24、10、5：框显得小，上下也不匀）。 -->
+              <Border Padding="16,28,16,26">
                 <StackPanel>
-                  <Border Width="42" Height="42" CornerRadius="11" Margin="0,0,0,10"
+                  <Border Width="42" Height="42" CornerRadius="11" Margin="0,0,0,12"
                           HorizontalAlignment="Center" Background="{DynamicResource Paper2}"
                           BorderBrush="{DynamicResource Rule}" BorderThickness="1">
                     <!-- 与标题栏入口同一个形状（两条文字线），换尺寸不换笔法 -->
@@ -1012,12 +1176,12 @@
                   </Border>
                   <TextBlock Text="还没有备忘" FontSize="12.5" FontWeight="SemiBold"
                              HorizontalAlignment="Center" Foreground="{DynamicResource Ink}"/>
-                  <TextBlock Text="点这里，或右下角的 ＋，写一条" FontSize="11" Margin="0,5,0,0"
+                  <TextBlock Text="点这里，或右下角的 ＋，写一条" FontSize="11" Margin="0,6,0,0"
                              HorizontalAlignment="Center" Foreground="{DynamicResource Ink3}"/>
                 </StackPanel>
-              </Button>
-            </StackPanel>
-          </ScrollViewer>
+              </Border>
+            </Grid>
+          </Button>
 
           <!-- 状态栏：叠在列表底边之上（覆盖层盖住了主面板的 StatusText，所以这里自己来一份）。
                右 86 与主面板一样留给右下斜线。 -->

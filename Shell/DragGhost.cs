@@ -51,21 +51,38 @@ internal sealed class DragGhost : Window
     private const double IconScale = 1.15;
 
     /// <summary>
-    /// 卡片外框比图标格多出来的宽度：左右内边距 9+9，再加描边。
-    /// 描边按<b>合并态的 2.5</b> 算——三态里它最粗，窗口宽度钉死后要给最粗的那一态留够，
-    /// 否则合并时图标会被挤掉两像素。
+    /// 卡片外框比图标座多出来的部分：内边距 9+9，再加描边 —— <b>宽高同一个值</b>
+    /// （四边等宽的内边距 + 恒定 1.5 描边，所以卡片是正方形）。
+    ///
+    /// 描边恒为 1.5，三态之间只改颜色与不透明度：既不改 <c>BorderThickness</c>
+    /// （改厚度会让窗口尺寸跳 2px，而 <see cref="CenterOn"/> 是按 <c>rect.Width/2</c> 居中的，
+    /// 尺寸一跳中心就偏 1px），也不在里面再垫一圈（那会变成"框里叠框"）。
     /// </summary>
-    private const double ShellChrome = 9 + 9 + 2.5 + 2.5;
+    private const double ShellChrome = 9 + 9 + 1.5 + 1.5;
+
+    /// <summary>
+    /// "吸过去"那一下的过渡时长（毫秒）。**只有进入方向有过渡**，解除一律瞬移。
+    ///
+    /// 70ms ≈ 4 帧：看得出是"贴过去"而不是硬切，又不至于让人觉得迟钝。
+    /// 试过 130ms 的对称插值（进入 + 解除都插值），用户反馈"油腻不跟手" ——
+    /// 跟手是底线，能省的只有"进入"这一下。
+    /// </summary>
+    private const double EnterGlideMs = 70;
 
     private readonly Image _art;
     private readonly TextBlock _glyph;
     private readonly UniformGrid _mini;
     private readonly Grid _iconHost;
-    private readonly TextBlock _label;
     private readonly Border _shell;
+    private readonly System.Windows.Threading.DispatcherTimer _glide;
 
     private IntPtr _hwnd;
     private GhostMode _mode = GhostMode.Normal;
+
+    private bool _gliding;
+    private int _glideStart;              // Environment.TickCount 起点
+    private double _gx0, _gy0;            // 起点（窗口中心，物理像素）
+    private double _gx1, _gy1;            // 目标
 
     public DragGhost()
     {
@@ -95,17 +112,6 @@ internal sealed class DragGhost : Window
             FontFamily = new FontFamily("Cascadia Mono, Consolas, Segoe UI Mono"),
             FontSize = 11,
             Visibility = Visibility.Collapsed
-        };
-
-        _label = new TextBlock
-        {
-            FontSize = 11,
-            LineHeight = 14,
-            TextAlignment = TextAlignment.Center,
-            TextWrapping = TextWrapping.Wrap,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxHeight = 30,
-            Margin = new Thickness(0, 5, 0, 0)
         };
 
         // 组合栏既没有 Icon 也没有占位字形（它在面板里是 2x2 迷你格），
@@ -139,24 +145,29 @@ internal sealed class DragGhost : Window
         _iconHost.Children.Add(_glyph);
         _iconHost.Children.Add(_mini);
 
-        var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
-        stack.Children.Add(_iconHost);
-        stack.Children.Add(_label);
 
+        // 描边恒为 1.5：三态之间**只改颜色与不透明度**，绝不改厚度 ——
+        // 改厚度会让窗口尺寸跳 2px，而定位是按 rect.Width/2 居中的，尺寸一跳中心就偏。
+        // 也不再往里面垫"合并态内环"：那会和外框叠成两圈（2026-09-30 用户反馈"框里叠一个框"）。
         _shell = new Border
         {
             CornerRadius = new CornerRadius(12),
             BorderThickness = new Thickness(1.5),
-            Padding = new Thickness(9, 8, 9, 7),
-            Child = stack
+            // 四边同宽：卡片里只有图标了（B 方案去掉标签），上下不再需要不对称的留白
+            Padding = new Thickness(9, 9, 9, 9),
+            Child = _iconHost
         };
         Content = _shell;
+
+        _glide = new System.Windows.Threading.DispatcherTimer(
+            System.Windows.Threading.DispatcherPriority.Render)
+        { Interval = TimeSpan.FromMilliseconds(16) };
+        _glide.Tick += OnGlideTick;
 
         // 色键走应用级资源，和面板/菜单同一套，换主题时幽灵也跟着变
         _shell.SetResourceReference(Border.BackgroundProperty, "Paper");
         _shell.SetResourceReference(Border.BorderBrushProperty, "Accent");
         _glyph.SetResourceReference(TextBlock.ForegroundProperty, "Ink2");
-        _label.SetResourceReference(TextBlock.ForegroundProperty, "Ink");
 
         SourceInitialized += OnSourceInitialized;
     }
@@ -174,24 +185,30 @@ internal sealed class DragGhost : Window
     /// <summary>
     /// 按被拖的磁贴铺内容并显示。只在拖拽开始那一刻调一次，之后只动位置。
     ///
-    /// <b>卡片宽度只由图标档决定</b>：图标座是 <c>side×side</c> 的固定格，三种内容
-    /// （真图标 / 占位字形 / 组合迷你格）都居中塞进同一格，标签的 <c>MaxWidth</c> 也是
-    /// <c>side</c>（长名字换行、两行后省略号，而不是把卡片撑宽），最后把 <c>side+23</c>
-    /// 一起钉到窗口的 <c>MinWidth/MaxWidth</c> 上。少了最后这一步还是会飘：
-    /// 实测 <c>_shell.DesiredSize</c> 已经是正确的 70，<c>Window.Width</c> 却停在上一张
-    /// 卡片的 136 不动，要等到标签换成两行、<b>高度</b>先变了，宽度才跟着回来。
+    /// <b>卡片是固定正方形，尺寸只由图标档决定</b>：图标座是 <c>side×side</c> 的固定格，
+    /// 三种内容（真图标 / 占位字形 / 组合迷你格）都居中塞进同一格，卡片 = <c>side + ShellChrome</c>。
+    ///
+    /// <b>B 方案（2026-09-30）：幽灵不再显示名字。</b>
+    /// 去掉标签有三个理由：① 卡片尺寸与名字彻底无关（原来高度随标签行数在 85↔99 之间跳，
+    /// 因为宽度钉了、<b>高度漏了</b>，而窗口是 <c>SizeToContent=WidthAndHeight</c>）；
+    /// ② 长名字不会再从词中间断成"DeepSee / k Harne…"；
+    /// ③ 拖拽时"我拎着哪个"本来就由<b>源磁贴压暗</b> + 光标位置表达，标签是冗余信息，
+    /// 去掉后卡片更小、更不容易挡住落点。代价：拖两个长得像的图标时分不清 —— 可接受。
     /// </summary>
     public void ShowFor(TileVm tile, double iconDip)
     {
         double side = Math.Round(iconDip * IconScale);
         _iconHost.Width = side;
         _iconHost.Height = side;
-        _label.MaxWidth = side;
 
-        // 只钉内容不够，窗口这一层也得钉——原因见上面那段。
+        // 宽高**都要钉**：窗口是 SizeToContent=WidthAndHeight，只钉一边另边仍会跟着内容走。
+        // 历史上踩过两次：先是宽度会停在上一张卡片的尺寸（见下面 Follow 前的 UpdateLayout），
+        // 再是高度随标签行数变。现在两个方向一起钉。
         double outer = side + ShellChrome;
         MinWidth = outer;
         MaxWidth = outer;
+        MinHeight = outer;
+        MaxHeight = outer;
 
         _art.Width = side;
         _art.Height = side;
@@ -205,7 +222,6 @@ internal sealed class DragGhost : Window
         _glyph.Visibility = !mini && tile.Icon is null && tile.DisplayGlyph.Length > 0
             ? Visibility.Visible
             : Visibility.Collapsed;
-        _label.Text = tile.Label;
 
         SetMode(GhostMode.Normal);
         if (!IsVisible) Show();
@@ -219,14 +235,62 @@ internal sealed class DragGhost : Window
     /// <summary>
     /// 贴到光标上：**图标的中心就是光标**，不再挂在光标右下角——
     /// 挂在角上离鼠标有一段距离，看不出"我正拎着它"。
+    ///
+    /// 一律<b>瞬移</b>，不做插值：跟手优先。
+    /// （2026-09-30 试过"吸附时朝目标中心插值、解除后再飘回光标"：解除那一下幽灵要慢慢追光标，
+    ///   手感立刻从"干脆"变"油腻"。那一版插值是为了掩盖判定翻转造成的瞬移，
+    ///   而翻转已经由判定侧的迟滞 + 锁定根治了 —— 不该让幽灵的跟手来背这个锅。）
     /// </summary>
     public void Follow()
     {
         if (_hwnd == IntPtr.Zero || !Native.GetCursorPos(out var cursor)) return;
+
+        // **解除即跟手**：正在"吸过去"的路上被叫回光标，就当场打断插值、直接贴上去。
+        // 这一条是整个方案的关键 —— 上一版插值就是因为"解除后还飘着追光标"被否掉的。
+        if (_gliding) { _gliding = false; _glide.Stop(); }
+
         CenterOn(cursor.X, cursor.Y);
     }
 
-    /// <summary>让幽灵的中心对准给定的屏幕物理坐标（合并态下吸附到目标磁贴中心）。</summary>
+    /// <summary>
+    /// 吸附态：<see cref="EnterGlideMs"/> 毫秒内缓出到给定坐标（物理像素，窗口中心）。
+    ///
+    /// 与 <see cref="Follow"/> 是一对：进入有过渡、解除瞬移。
+    /// 插值途中再调用只更新目标（起点与计时不变），所以目标跟着光标走（橡皮筋）时不会重来一遍。
+    /// </summary>
+    public void GlideTo(int physX, int physY)
+    {
+        if (_hwnd == IntPtr.Zero || !Native.GetWindowRect(_hwnd, out var rect)) return;
+
+        if (!_gliding)
+        {
+            _gx0 = rect.Left + rect.Width / 2.0;
+            _gy0 = rect.Top + rect.Height / 2.0;
+            _glideStart = Environment.TickCount;
+            _gliding = true;
+            _glide.Start();
+        }
+
+        _gx1 = physX;
+        _gy1 = physY;
+    }
+
+    private void OnGlideTick(object? sender, EventArgs e)
+    {
+        double t = (Environment.TickCount - _glideStart) / EnterGlideMs;
+        if (t >= 1)
+        {
+            t = 1;
+            _gliding = false;
+            _glide.Stop();     // 到位就停，不留一个空转的计时器
+        }
+
+        double k = 1 - Math.Pow(1 - t, 3);   // ease-out cubic：起步快、收尾稳
+        CenterOn((int)Math.Round(_gx0 + (_gx1 - _gx0) * k),
+                 (int)Math.Round(_gy0 + (_gy1 - _gy0) * k));
+    }
+
+    /// <summary>让幽灵的中心对准给定的屏幕物理坐标。</summary>
     public void CenterOn(int physX, int physY)
     {
         if (_hwnd == IntPtr.Zero || !Native.GetWindowRect(_hwnd, out var rect)) return;
@@ -248,20 +312,18 @@ internal sealed class DragGhost : Window
         switch (mode)
         {
             case GhostMode.Merge:
-                _shell.SetResourceReference(Border.BorderBrushProperty, "Accent");
-                _shell.BorderThickness = new Thickness(2.5);
+                // 合并态用"更深的主题色 + 更实"表达，**不再垫第二圈环**（那会变成框里叠框）
+                _shell.SetResourceReference(Border.BorderBrushProperty, "AccentStrong");
                 Opacity = 0.92;
                 break;
 
             case GhostMode.Cancel:
                 _shell.SetResourceReference(Border.BorderBrushProperty, "Ink3");
-                _shell.BorderThickness = new Thickness(1.5);
                 Opacity = 0.45;
                 break;
 
             default:
                 _shell.SetResourceReference(Border.BorderBrushProperty, "Accent");
-                _shell.BorderThickness = new Thickness(1.5);
                 Opacity = 0.78;
                 break;
         }
@@ -269,6 +331,8 @@ internal sealed class DragGhost : Window
 
     public void HideGhost()
     {
+        _glide.Stop();
+        _gliding = false;
         if (IsVisible) Hide();
     }
 }

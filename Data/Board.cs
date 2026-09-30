@@ -73,6 +73,20 @@ public sealed class TileVm : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// <b>没有自定义名时本该显示的名字</b> —— 也就是 Shell 显示名（IconPump 查到后写进来）。
+    /// 它<b>不参与显示</b>，只用来回答一个问题："用户敲的是不是就等于系统本来就给的那个名字？"
+    ///
+    /// 为什么不能拿 <see cref="Label"/> 当那个基准：条目一旦改过名，<c>Label</c> 就是用户自己的字，
+    /// 拿它当基准会让"再打开一次、原样点确定"悄悄退化成恢复原名。
+    /// 为什么不能拿 <c>BoardBuilder.DeriveName</c>：它把扩展名剥掉了（steam.exe → steam），
+    /// 于是"在重命名里把 .exe 删掉"敲出来的 steam 会被误判成"就是默认" → 自定义标记被清掉 →
+    /// IconPump 立刻用 Shell 显示名把 .exe 又写回来（2026-09-30 修的那个 BUG）。
+    ///
+    /// Shell 还没查到时（刚拖进来那一瞬）为 null，那时回落到推导名。
+    /// </summary>
+    public string? DefaultLabel { get; set; }
+
+    /// <summary>
     /// 预设图形（UI 手册 §6 的图标族，<see cref="Glyphs"/> 生成自 design/ui-mock.html）。
     /// 按 Kind 与文件类型取，**不查 Shell**——所以拖进来立刻就有形状，不用等图标解码。
     /// </summary>

@@ -215,6 +215,12 @@ public sealed class IconPump : IDisposable
         // 这次 Shell 查询还要顺带拿显示名与失效判定，那两样一律照单全收——它们跟图标是什么画风无关。
         if (entry.Image is not null && tile.WantsShellIcon) tile.Icon = entry.Image;
 
+        // 默认显示名**一律**记下来，不管这一格有没有自定义名：
+        // 重命名要拿它当"用户是不是没改"的基准，而改过名的格子也得知道真正的默认名是什么
+        // （否则第二次打开对话框原样点确定就会退化成恢复原名）。见 TileVm.DefaultLabel。
+        if (!string.IsNullOrWhiteSpace(entry.DisplayName))
+            tile.DefaultLabel = entry.DisplayName;
+
         // 用户没改过名才用 Shell 显示名覆盖占位名
         if (!tile.HasCustomLabel && !string.IsNullOrWhiteSpace(entry.DisplayName))
             tile.Label = entry.DisplayName;

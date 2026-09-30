@@ -32,13 +32,52 @@ public partial class PanelWindow : Window
 
     public static readonly DependencyProperty IconSizeProperty =
         DependencyProperty.Register(nameof(IconSize), typeof(double), typeof(PanelWindow),
-            new PropertyMetadata(42.0));
+            new PropertyMetadata(42.0, OnIconSizeChanged));
 
     /// <summary>磁贴内图标边长。模板通过 RelativeSource 绑它，改这里即整屏重排。</summary>
     public double IconSize
     {
         get => (double)GetValue(IconSizeProperty);
         set => SetValue(IconSizeProperty, value);
+    }
+
+    /// <summary>
+    /// 真图标（Shell / 自定义）贴片的边长 —— <b>图标格 × 80%</b>（B 方案，2026-09-30）。
+    ///
+    /// 为什么不再满铺：满铺会把纸卡（Paper2 底 + Rule 描边）整个盖住，图标的方角还骑在
+    /// R11 圆角外面；而且 <c>box</c> 有 1px 描边、内容区只有 IconSize−2，写死 IconSize×IconSize
+    /// 的 Image <b>底边必然被裁 2px</b>。缩到 80% 之后纸卡重新成为底下那层"画框"，
+    /// 真图标磁贴和线稿磁贴回到同一种画法。
+    ///
+    /// 由 <see cref="IconSize"/> 派生，**不要直接设**（XAML 绑定里做不了算术）。
+    /// </summary>
+    public static readonly DependencyProperty ArtSizeProperty =
+        DependencyProperty.Register(nameof(ArtSize), typeof(double), typeof(PanelWindow),
+            new PropertyMetadata(34.0));
+
+    public double ArtSize
+    {
+        get => (double)GetValue(ArtSizeProperty);
+        set => SetValue(ArtSizeProperty, value);
+    }
+
+    /// <summary>贴片圆角 = 贴片边长 × 28%（与图标格圆角 11:42 的相对量同档）。同样由 IconSize 派生。</summary>
+    public static readonly DependencyProperty ArtRadiusProperty =
+        DependencyProperty.Register(nameof(ArtRadius), typeof(double), typeof(PanelWindow),
+            new PropertyMetadata(9.0));
+
+    public double ArtRadius
+    {
+        get => (double)GetValue(ArtRadiusProperty);
+        set => SetValue(ArtRadiusProperty, value);
+    }
+
+    private static void OnIconSizeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        // 取整：贴片要落在整像素上，34→9 这一档在 100%/150%/200% 下都对齐
+        double size = (double)e.NewValue;
+        d.SetValue(ArtSizeProperty, Math.Round(size * 0.8));
+        d.SetValue(ArtRadiusProperty, Math.Round(size * 0.8 * 0.28));
     }
 
     private readonly PerfProbe _probe = new();
@@ -107,6 +146,12 @@ public partial class PanelWindow : Window
         // 取不到就保持没有 Data，按钮仍可点（等于一个空图标按钮），不影响其它功能。
         SettingsGlyph.Data = FontGlyphPath.Build(
             "Segoe Fluent Icons, Segoe MDL2 Assets", "\uE713", emSize: 15);
+
+        // 空态那颗"拖进来"图标：直接用磁贴族的 Drop 图形（下箭头 + 托盘），
+        // 拖放占位格画的就是它 —— 两处同一个几何，不可能画歪。
+        // 在代码里赋而不是 XAML 里 x:Static：这个项目吃过"内部类型出现在 XAML 里"的亏
+        // （菜单图标那次的 PathError），代码赋值没有任何中间环节。
+        EmptyIcon.Data = Glyphs.Drop;
 
         // 面包屑：ItemsControl 的条目直接放 Button，模板由 CrumbButton 样式提供
         _store.Load();
@@ -683,7 +728,9 @@ public partial class PanelWindow : Window
     /// 把可见磁贴交给后台去取图标 / 显示名 / 失效状态。
     /// 绝不在 UI 线程查 Shell —— 见 <see cref="IconPump"/> 的注释。
     /// </summary>
-    private void ScheduleIcons() => _icons?.Enqueue(_board.Tiles, (int)Math.Round(IconSize * DpiScaleX));
+    // 按**贴片**的真实显示尺寸去要位图，不是按图标格：贴片只占 80%，
+    // 按 IconSize 解码等于白解一张大 56%（面积）的图塞进缓存 —— 就是 09-29 那次内存排查管的地方。
+    private void ScheduleIcons() => _icons?.Enqueue(_board.Tiles, (int)Math.Round(ArtSize * DpiScaleX));
 
     // ------------------------------------------------------------ 交互
 
@@ -1031,8 +1078,12 @@ public partial class PanelWindow : Window
         if (tile.EntryId is int eid)
         {
             menu.Items.Add(Sep());
-            // 统一叫「重命名」，不再分「恢复原名」：改回去只要把上面那行的完整路径里的
-            // 本名再敲一遍（此时会当成"没有自定义"，标记自动清掉）。少一项菜单，少一层心智负担。
+            // 统一叫「重命名」，不再分「恢复原名」：想改回去，把**改名前面板上显示的那个名字**
+            // 敲回来就行（它正是"没有自定义时的显示名"，标记会自动清掉）。少一项菜单，少一层心智负担。
+            //
+            // 注意别拿"路径末尾那段"当本名：那是磁盘文件名，而这里比的是 Shell 显示名。
+            // 系统开了"隐藏已知扩展名"时两者不同（面板显示 steam、路径末尾是 steam.exe），
+            // 照路径敲会被当成自定义名钉住。
             menu.Items.Add(MenuItem("重命名", () => RenameEntry(eid)));
             menu.Items.Add(tile.CustomIcon is null
                 ? MenuItem("更改图标…", () => ChangeIcon(eid, null))
@@ -1188,25 +1239,33 @@ public partial class PanelWindow : Window
         var entry = _store.Entry(id);
         if (entry is null) return;
 
+        var tile = TileOf(id);
+
         // 预填**面板上显示的那个名字**，而不是 entry.Label ?? entry.Path。
         // entry.Label 是"用户自定义名"，新拖进来的还没有，旧写法就整条路径塞进了输入框
         // —— 用户以为在改名字，其实框里是一条完整路径。
         // TileVm.Label 才是真的显示名：它已经在 BoardBuilder.FromEntry 里做过
         // 「自定义名 ?? 路径推导名」，之后还会被 Shell 显示名替换（IconPump 只改没自定义过的）。
-        string initial = DeriveFromTile(id) ?? BoardBuilder.DeriveName(entry.Path, entry.IsDir);
+        string initial = tile?.Label ?? BoardBuilder.DeriveName(entry.Path, entry.IsDir);
 
         // 路径永远显示在标题下面：仅凭显示名分不清谁是谁（面板上三个同名文件是常事），
         // 而且刚才那条"和 initial 相同就不显示"的判断，恰好让新条目第一次打开时连路径都没有。
         string? typed = PromptText.Show(this, "重命名", initial, entry.Path);
         if (typed is null) return;
 
-        // 敲的就是磁盘上的本名（或从本名推导出来的那个）时，等于没有"自定义"这回事：
+        // 敲的就是"没有自定义时本来会显示的那个名字"时，等于没有"自定义"这回事：
         // 清掉标记，以后系统显示名改了它跟着走。
-        // 注意这里比的是**推导名**而不是 tile.Label —— 后者在改过名之后就是用户自己那串字，
-        // 拿它当基准会让"原样不动点确定"悄悄退化成恢复原名。
-        bool sameAsDerived = string.Equals(typed, BoardBuilder.DeriveName(entry.Path, entry.IsDir),
-                                           StringComparison.Ordinal);
-        _store.RenameEntry(id, sameAsDerived ? null : typed);
+        //
+        // 基准必须是 **Shell 显示名**（<see cref="TileVm.DefaultLabel"/>），不能是路径推导名：
+        // DeriveName 把扩展名剥掉了（steam.exe → steam），于是"在重命名里把 .exe 删掉"
+        // 敲出来的 steam 会被误判成"就是默认" → 自定义标记被清 → IconPump 立刻用 Shell
+        // 显示名把 .exe 又写回来 —— 名字改不动就是这一个环（2026-09-30）。
+        // 也不能拿 tile.Label 当基准：改过名的格子它就是用户自己那串字，第二次打开对话框
+        // 原样点确定会退化成恢复原名。
+        // Shell 还没查到时（刚拖进来那一瞬）回落到推导名，行为与以前一致。
+        string baseline = tile?.DefaultLabel ?? BoardBuilder.DeriveName(entry.Path, entry.IsDir);
+        bool sameAsDefault = string.Equals(typed, baseline, StringComparison.Ordinal);
+        _store.RenameEntry(id, sameAsDefault ? null : typed);
         Render(animate: false);
     }
 
@@ -1227,8 +1286,7 @@ public partial class PanelWindow : Window
         Status($"已重命名为「{typed}」");
     }
 
-    private string? DeriveFromTile(int id) =>
-        _board.Tiles.FirstOrDefault(t => t.EntryId == id)?.Label;
+    private TileVm? TileOf(int id) => _board.Tiles.FirstOrDefault(t => t.EntryId == id);
 
     private void ChangeIcon(int id, string? unused, bool clear = false)
     {
