@@ -211,7 +211,7 @@
                 </StackPanel>
 
                 <TextBlock Grid.Column="1" Text="{Binding TimeText}" FontSize="10.5" Margin="10,2,0,0"
-                           FontFamily="Cascadia Mono, Consolas, Segoe UI Mono"
+                           FontFamily="Cascadia Mono, Consolas, Segoe UI Mono, Microsoft YaHei"
                            Foreground="{DynamicResource Ink3}"/>
               </Grid>
             </Border>
@@ -252,6 +252,35 @@
             <ControlTemplate.Triggers>
               <!-- 悬停只改底色：描边（虚线）的颜色由 Rectangle 自己的样式管，
                    这里再碰 BorderBrush 就又会长出第二条线。 -->
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="{DynamicResource AccentSoft}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 列表下方那行「虚线新建条目」（design/memo-new-row.html 的 V1：居中 + 与「新建备忘」）。
+         与空态 NoteEmpty 的关系：**同一支虚线**（1.5px / DashArray "5 4" = 7.5px 段 6px 空）、
+         同一种悬停（底 AccentSoft、虚线 AccentLine → Accent），但**圆角 10 跟条目走**——
+         它现在是列表里的一行，不是空态那块大提示区。虚线的段长与笔宽不变，
+         所以「同一个应用里可点虚线框只有一种画法」这条仍然成立。
+         高度由使用处给（52 = 单行条目高度），样式不写死：空态与行两种用法要分开。
+         同样**不给 BorderBrush**——WPF 的 Border 画不出虚线，外框由内容层那个 Rectangle
+         提供，一旦再给就变成"实线套虚线"（空态踩过，实机被用户当场指出过）。
+         双向 Stretch 也不能省（同空态：少一条就会塌成"包住文字的小方框"）。 -->
+    <Style x:Key="NoteGhostRow" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="10">
+              <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+            </Border>
+            <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="bd" Property="Background" Value="{DynamicResource AccentSoft}"/>
               </Trigger>
@@ -360,8 +389,11 @@
 
     <!-- 置顶用勾选，不是药丸开关（§4.10 没定义复选框，这条要补进手册）：
          16×16 · 圆角 4 · 框 1px Rule · 底 Paper2；勾选 = Accent 底 + AccentOn 钩。
-         悬停：整行淡强调色底 + 小方格淡强调色填充 —— 方格本身只有 16px，
-         不给点反馈的话用户不敢确定自己瞄准了没有（点歪就会落到"点空白返回"上，整页关掉）。 -->
+         悬停 = **淡底 + 1px 细框**（AccentSoft + AccentLine），与右边的删除按钮同一套语法、
+         同一档粗细，只是色相从危险红换成主题色（B1，2026-10-01，比稿见
+         design/memo-pin-hover.html）。原来只有一层 Paper2 底、没有框 —— 纸色上叠纸色
+         几乎看不见，唯一线索是那个 16px 小方格，而热区是 67×30 的整块，
+         视觉线索比热区小一大截，就是"感觉不好点"的来源。 -->
     <Style x:Key="NoteCheck" TargetType="CheckBox">
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="BorderThickness" Value="0"/>
@@ -371,9 +403,12 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="CheckBox">
-            <!-- 可点区域就是这一整条 Border：8,5 → 10,7 把上下各放宽 2px、左右各 2px。
-                 18px 的小方格配上 26px 高的热区，瞄准时很容易点偏到外面。 -->
-            <Border x:Name="row" Background="Transparent" CornerRadius="8" Padding="10,7,10,7">
+            <!-- 可点区域就是这一整条 Border：热区 = 高亮块，30px 高。
+                 Padding 是 9,6 而不是 10,7：加了 1px 边框之后，边框要吃掉 1px，
+                 不补回来整行会从 30 变成 32 —— 既顶到下面的状态栏，也和删除那个
+                 被 Stretch 撑出来的 30 错开 2px（见下面那行的注释）。 -->
+            <Border x:Name="row" Background="Transparent" BorderBrush="Transparent"
+                    BorderThickness="1" CornerRadius="8" Padding="9,6,9,6">
               <StackPanel Orientation="Horizontal">
                 <Border x:Name="box" Width="16" Height="16" CornerRadius="4"
                         Background="{DynamicResource Paper2}"
@@ -389,11 +424,16 @@
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="row" Property="Background" Value="{DynamicResource Paper2}"/>
-                <!-- 淡绿（= 强调色加 alpha 的 AccentSoft，默认森林绿主题）。不写死绿色：
-                     换主题色后这里必须跟着走，否则蓝主题下悬停会冒出一块绿（D15）。 -->
-                <Setter TargetName="box" Property="Background" Value="{DynamicResource AccentSoft}"/>
-                <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+                <!-- 与删除按钮同一套语法：淡底 + 1px 细框。两个都是主题色加 alpha 派生
+                     （AccentSoft 12% / AccentLine 34%，夜空纸 16% / 40%），不写死色值 ——
+                     换主题色后必须跟着走，否则蓝主题下悬停会冒出一块绿（D15）。 -->
+                <Setter TargetName="row" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                <Setter TargetName="row" Property="BorderBrush" Value="{DynamicResource AccentLine}"/>
+
+                <!-- 方格**不能再填 AccentSoft**：整块的底已经是它了，填了方格就消失，
+                     只剩一圈淡框。改成把框提到 Accent 实色、底维持 Paper2 ——
+                     于是三档递进成立：静止 Rule 框 → 悬停 Accent 框 → 选中 Accent 实心 + 钩。 -->
+                <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
               </Trigger>
               <Trigger Property="IsChecked" Value="True">
                 <Setter TargetName="box" Property="Background" Value="{DynamicResource Accent}"/>
@@ -1118,6 +1158,49 @@
                 </ItemsControl.ItemTemplate>
               </ItemsControl>
 
+              <!-- 有条目时的新建入口：跟在最后一条下面，**52px 与单行条目等高、Margin 6 与条目同距**。
+                   虚线规格照抄空态 MemoEmpty（Rectangle 1.5 / DashArray "5 4" / 半径 = 圆角 10 − 0.75 = 9.25）；
+                   悬停分两处管：Rectangle 的 Stroke 用 DataTrigger 切 AccentLine → Accent，
+                   文字同理，底色归 NoteGhostRow 模板的 IsMouseOver 触发器。
+                   点击 = CreateNote()，与右下角 FAB、空态提示区是同一个入口。
+                   **可见性在 RenderMemoList 里与空态互斥**（有条目才出现，空态时它藏起来）。
+                   命中测试不用操心：InsideInteractive 认 Button，所以点它不会被当成"点空白返回"。 -->
+              <Button x:Name="MemoNewRow" Style="{StaticResource NoteGhostRow}"
+                      HorizontalAlignment="Stretch" Height="52" Margin="0,0,0,6" ToolTip="新建备忘">
+                <Grid>
+                  <Rectangle StrokeThickness="1.5" StrokeDashArray="5 4" RadiusX="9.25" RadiusY="9.25"
+                             Stretch="Fill" IsHitTestVisible="False">
+                    <Rectangle.Style>
+                      <Style TargetType="Rectangle">
+                        <Setter Property="Stroke" Value="{DynamicResource AccentLine}"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True">
+                            <Setter Property="Stroke" Value="{DynamicResource Accent}"/>
+                          </DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </Rectangle.Style>
+                  </Rectangle>
+                  <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <!-- + 的形状与右下角 FAB 同一条 Data（24 格），只换尺寸与笔宽 -->
+                    <Path Width="15" Height="15" Stretch="Uniform" StrokeThickness="1.8"
+                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" Margin="0,0,8,0"
+                          Stroke="{DynamicResource Accent}" Data="M 12,5 V 19  M 5,12 H 19"/>
+                    <TextBlock Text="新建备忘" FontSize="12" VerticalAlignment="Center">
+                      <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                          <Setter Property="Foreground" Value="{DynamicResource Ink2}"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True">
+                              <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
+                            </DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </TextBlock.Style>
+                    </TextBlock>
+                  </StackPanel>
+                </Grid>
+              </Button>
             </StackPanel>
           </ScrollViewer>
 
@@ -1266,9 +1349,9 @@
             <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right"
                         VerticalAlignment="Bottom" Margin="0,9,0,0">
               <!-- 两个都不设 VerticalAlignment：默认 Stretch，一起撑满这一行的高度。
-                   置顶那一行的热区现在是 30px（10,7 内边距），比删除按钮的 28 高，
-                   给删除按钮设 Center 的话它的底边就会比置顶高 1px、也比状态栏高 1px。
-                   都撑满，两者的底边才和左下角状态栏文字在同一条线上。 -->
+                   置顶那一行的热区现在是 30px（9,6 内边距 + 上下各 1px 边框），
+                   比删除按钮期望的 28 高，给删除按钮设 Center 的话它的底边就会比置顶高 1px、
+                   也比状态栏高 1px。都撑满，两者的底边才和左下角状态栏文字在同一条线上。 -->
               <CheckBox x:Name="MemoPin" Style="{StaticResource NoteCheck}" Content="置顶"
                         Margin="0,0,10,0"/>
               <Button x:Name="MemoDelete" Style="{StaticResource NoteDangerButton}" ToolTip="删除这条备忘">
@@ -1283,8 +1366,20 @@
             </StackPanel>
           </Grid>
 
-          <!-- 叠在表单行底部，右 86 与主面板状态栏一样避开右下角那一带 -->
+          <!-- 叠在表单行底部，右 86 与主面板状态栏一样避开右下角那一带。
+
+               **必须 IsHitTestVisible=False**：它声明在 MemoForm 之后 → z 序在上，
+               而底边距与 MemoForm 一样是 10（两者底边在同一条线上），于是它那条
+               **13.3px 高的矩形正好罩住「置顶 / 删除」的下半截** —— 实测置顶 30px 高、
+               底部 13.3px 全部重叠（探针数据见 README）。TextBlock 的命中测试是**整个矩形**
+               （不是只有文字那一小块），所以点在按钮下半截，命中的是这个状态栏：
+               它既不是 Button/TextBox/CheckBox，父级又是外层 Grid 而不是 MemoForm →
+               「点空白返回」那两条判断都不满足 → **编辑页被关掉**（2026-10-01 修）。
+
+               它只是一行读数，本来就不该吃点击。关掉之后，点它那片会穿透到 MemoForm，
+               反而回到"不算空白"的正确行为上。 -->
           <TextBlock x:Name="MemoEditStatus" Grid.Row="2" VerticalAlignment="Bottom"
+                     IsHitTestVisible="False"
                      Margin="16,0,86,10" FontSize="10.5" Foreground="{DynamicResource Ink3}"/>
         </Grid>
       </Border>

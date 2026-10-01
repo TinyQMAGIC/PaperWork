@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;   // UniformGrid
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Shapes;                 // Path / Shape（预设线稿）
 using Paperwork.Data;
 
 namespace Paperwork.Shell;
@@ -72,6 +73,8 @@ internal sealed class DragGhost : Window
     private readonly Image _art;
     private readonly TextBlock _glyph;
     private readonly UniformGrid _mini;
+    private readonly Viewbox _preset;
+    private readonly Path _presetPath;
     private readonly Grid _iconHost;
     private readonly Border _shell;
     private readonly System.Windows.Threading.DispatcherTimer _glide;
@@ -109,7 +112,7 @@ internal sealed class DragGhost : Window
         {
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            FontFamily = new FontFamily("Cascadia Mono, Consolas, Segoe UI Mono"),
+            FontFamily = new FontFamily("Cascadia Mono, Consolas, Segoe UI Mono, Microsoft YaHei"),
             FontSize = 11,
             Visibility = Visibility.Collapsed
         };
@@ -137,13 +140,44 @@ internal sealed class DragGhost : Window
             _mini.Children.Add(cell);
         }
 
+        // 预设线稿：文件夹、.txt / .png / .pdf 这些**自绘图标**在面板里画的就是它。
+        // **与磁贴模板里的 <c>presetArt</c> 逐字同款**（PanelWindow.xaml 那个 Viewbox + Path）：
+        // 24×24 的图形配四边各 12 的 Margin = 48 的设计格，被 Viewbox 缩放后恒为
+        // **图标座的 50%**（磁贴那边 40 → 20，这边 side → side/2），笔宽的有效占比也一样
+        // （两边都是 3.3%）。所以这里一个尺寸都不用另算，照抄就对齐。
+        //
+        // 2026-10-01 之前**没有这一档**，症状是：拖文件夹是个空框（它的 DisplayGlyph 是空串，
+        // 三个元素全 Collapsed）；拖 .txt / .png 显示的是 "TXT" / "PNG" 文字，
+        // 而不是面板上那张线稿。判定漏一档的根子在于"幽灵自己重推了一遍条件"——
+        // 现在一律照抄 TileVm 的旗标，见 ShowFor。
+        _presetPath = new Path
+        {
+            Width = 24,
+            Height = 24,
+            Margin = new Thickness(12),
+            Stretch = Stretch.Uniform,
+            StrokeThickness = 1.6,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            StrokeLineJoin = PenLineJoin.Round
+        };
+        _preset = new Viewbox
+        {
+            Stretch = Stretch.Uniform,
+            Child = _presetPath,
+            Visibility = Visibility.Collapsed
+        };
+
         // 图标座是个**固定正方形**，边长只由图标档决定（见 ShowFor）。
-        // 三种内容（真图标 / 占位字形 / 组合迷你格）都居中塞进这一格里，
+        // 四种内容（真图标 / 预设线稿 / 占位字形 / 组合迷你格）都居中塞进这一格里，
         // 所以卡片宽度与"这次拖到的图标解码出来没有""拖的是不是组合"无关。
+        // 加入顺序照抄磁贴模板（art → 文字 → 迷你格 → 预设线稿），虽然四态互斥、
+        // 谁在上层都一样，但保持同序才好在两处之间对照着读。
         _iconHost = new Grid { HorizontalAlignment = HorizontalAlignment.Center };
         _iconHost.Children.Add(_art);
         _iconHost.Children.Add(_glyph);
         _iconHost.Children.Add(_mini);
+        _iconHost.Children.Add(_preset);
 
 
         // 描边恒为 1.5：三态之间**只改颜色与不透明度**，绝不改厚度 ——
@@ -168,6 +202,8 @@ internal sealed class DragGhost : Window
         _shell.SetResourceReference(Border.BackgroundProperty, "Paper");
         _shell.SetResourceReference(Border.BorderBrushProperty, "Accent");
         _glyph.SetResourceReference(TextBlock.ForegroundProperty, "Ink2");
+        // 线稿与磁贴模板里那条同一个色（Ink2）—— 换纸换色自动跟随（D15）
+        _presetPath.SetResourceReference(Shape.StrokeProperty, "Ink2");
 
         SourceInitialized += OnSourceInitialized;
     }
@@ -214,14 +250,26 @@ internal sealed class DragGhost : Window
         _art.Height = side;
         _art.Source = tile.Icon;
 
+        // 图标四态与磁贴模板一一对应，优先级：组合迷你格 → 真图标 → 预设线稿 → 扩展名文字。
+        //
+        // **判定一律用 TileVm 自己的旗标**，不要在这儿重新推条件：
+        // <c>HasGlyphData</c> / <c>HasGlyphText</c> 里都已经含了"真图标到了就让位"这条约定，
+        // 手写一遍条件就会漏档 —— 2026-10-01 漏掉预设线稿那一档就是这么来的
+        // （文件夹拖起来是空框、.txt 显示成 "TXT" 文字）。
         bool mini = tile.IsGroupTile && tile.Icon is null;
-        _art.Visibility = !mini && tile.Icon is not null ? Visibility.Visible : Visibility.Collapsed;
-        _mini.Visibility = mini ? Visibility.Visible : Visibility.Collapsed;
 
+        _art.Visibility = !mini && tile.HasIcon ? Visibility.Visible : Visibility.Collapsed;
+
+        _presetPath.Data = tile.GlyphData;
+        _preset.Visibility = !mini && tile.HasGlyphData ? Visibility.Visible : Visibility.Collapsed;
+
+        // 扩展名文字这一档现在**基本是死路**：HasGlyphText 要求 GlyphData 为 null，
+        // 而 Glyphs.ForPath 从不返回 null（只有组合格满足，而组合显示的是迷你格）。
+        // 保留它作兜底，别拿它当"没图标时该长什么样"的基准。
         _glyph.Text = tile.DisplayGlyph;
-        _glyph.Visibility = !mini && tile.Icon is null && tile.DisplayGlyph.Length > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        _glyph.Visibility = !mini && tile.HasGlyphText ? Visibility.Visible : Visibility.Collapsed;
+
+        _mini.Visibility = mini ? Visibility.Visible : Visibility.Collapsed;
 
         SetMode(GhostMode.Normal);
         if (!IsVisible) Show();

@@ -119,8 +119,11 @@ public partial class PanelWindow
     private Point _lastDecide;
     private bool _decided;
 
-    /// <summary>上一次插入判定的目标与结论（方案 2 的死带用）。目标一换就重新判。</summary>
-    private TileVm? _insertTarget;
+    /// <summary>
+    /// 上一次插入判定的<b>槽位</b>与结论（死带用）。槽位一换就重新判。
+    /// 旧版存的是 <c>TileVm</c> 目标 —— 改成槽位是整个改动的一部分：判定不再依赖"压住了哪一块"。
+    /// </summary>
+    private int _insertSlot = -1;
     private bool _insertAfter;
 
     /// <summary>按下时有没有落在磁贴上。与 <see cref="_dragTile"/> 不同：它不考虑"这块能不能拖"。</summary>
@@ -149,11 +152,18 @@ public partial class PanelWindow
         _pressOnTile = false;
         _dragIsGroup = false;
         _decided = false;       // 死区：新的一次拖拽从头开始判
-        _insertTarget = null;   // 插入死带同理
+        _insertSlot = -1;       // 插入死带同理
         ClearHints();
 
         if (e.LeftButton != MouseButtonState.Pressed) return;
         if (SettingsPanel.Visibility == Visibility.Visible) return;
+
+        // 双击的**第二下**不参与拖拽：它紧接着就会换层（Activate → Render），
+        // 而这次按下记下的是【旧层】那枚磁贴 —— 留着它，第二下按住时手一抖就会在新层上
+        // 冒出旧层的幽灵，松手还会走到 ReorderUp 的落盘分支（见 InvalidateDragForLayer）。
+        // 不存在"双击后按住拖"这种用法，直接不认这次按下。
+        // 放在重置之后：上一轮的残留照旧先清掉。
+        if (e.ClickCount >= 2) return;
 
         var hit = TileFrom(e.OriginalSource);
 
@@ -231,13 +241,19 @@ public partial class PanelWindow
     /// </summary>
     private void DecideDrop(Point now)
     {
-        // 捕获状态下 OriginalSource 会固定成捕获元素，所以命中测试必须自己做
+        // 捕获状态下 OriginalSource 会固定成捕获元素，所以命中测试必须自己做。
+        // **但命中测试只用来回答"压住了哪一块"（并入 / 合并要用它）** ——
+        // 插入位次不再用它，见 SlotInsert：那个问题纯几何就能答。
         var target = TileAt(now);
         if (target is null)
         {
+            // 没压在任何磁贴上（列间/行间缝隙、首尾之外、行带侧边）：以前这里直接走人，
+            // 于是缝隙成了死区、首尾之外还会切成 Cancel。现在照样让几何去算位次
+            // —— 它自带"离所有行都太远就不插入"的门槛，拖到下方一大截空白仍然什么都不做。
             ClearHints();
             _ghost?.Follow();
-            _ghost?.SetMode(IsCursorInsideTiles() ? GhostMode.Normal : GhostMode.Cancel);
+            _ghost?.SetMode(IsCursorInsideContentArea() ? GhostMode.Normal : GhostMode.Cancel);
+            SlotInsert(now);
             return;
         }
 
@@ -253,9 +269,7 @@ public partial class PanelWindow
             ClearHints();
             _ghost?.Follow();
             _ghost?.SetMode(GhostMode.Normal);
-
-            if (TileBounds(target) is { } plain && !ReferenceEquals(target, _dragTile))
-                MoveInPreview(target, plain, now);
+            SlotInsert(now);
             return;
         }
 
@@ -283,7 +297,7 @@ public partial class PanelWindow
         // 必须和别的磁贴一套手感——压住图标才收纳，压到两侧就是插前/插后。
         // 组合栏自己被拖到另一个组合上时走的是**排序**，不是"并入"——所以这里要看拖的是什么。
         if (!_dragIsGroup && target.Kind == TileKind.Group && _board.CanCreateGroup
-            && InsideMergeCircle(now, bounds.Value, MergeRadiusRatio))
+            && InsideMergeCircle(now, bounds.Value, 1.0))   // 1.0 = 进入半径
         {
             SetGroupHint(target);
             _ghost?.SetMode(GhostMode.Normal);
@@ -302,7 +316,7 @@ public partial class PanelWindow
         // 落点二：压到另一块**条目**磁贴的正中心 = 两个图标叠到一起 → 新建组合收纳。
         // 组合栏不当合并的源、组合磁贴也不当合并的"另一块"（那是并入，见落点一；D17）。
         if (!_dragIsGroup && MergeAllowedHere && target.Kind != TileKind.Group
-            && InsideMergeCircle(now, bounds.Value, MergeRadiusRatio))
+            && InsideMergeCircle(now, bounds.Value, 1.0))   // 1.0 = 进入半径
         {
             SetMergeHint(target);
             _ghost?.SetMode(GhostMode.Merge);
@@ -320,11 +334,12 @@ public partial class PanelWindow
             return;
         }
 
-        // 落点三：普通插入。落点指示就是"磁贴自己在实时挪动"，不再额外画竖杠
+        // 落点三：普通插入 —— 按几何槽位算"插到第几位"（见 SlotInsert）。
+        // 落点指示就是"磁贴自己在实时挪动"，不再额外画竖杠。
         ClearHints();
         _ghost?.Follow();
         _ghost?.SetMode(GhostMode.Normal);
-        MoveInPreview(target, bounds, now);
+        SlotInsert(now);
     }
 
     /// <summary>
@@ -383,7 +398,8 @@ public partial class PanelWindow
 
         if (!_dragActive)
         {
-            // 一次普通抬手：什么都不做，交给 OnMouseUp 的单击语义去展开组合/文件夹
+            // 一次普通抬手：什么都不做，交给 OnMouseUp 的语义去处理
+            // （组合单击即展开；文件 / 快捷方式 / 文件夹 / 收尾格要双击，见 TileVm.NeedsDoubleClick）
             _dragTile = null;
             _dragOrder = null;
             return;
@@ -391,7 +407,7 @@ public partial class PanelWindow
 
         int? intoGroup = _groupHint?.GroupId;
         int? mergeWith = _mergeHint?.EntryId;
-        bool outside = !IsCursorInsideTiles();
+        bool outside = !IsCursorInsideContentArea();
         FinishDragVisual();
 
         // 拖到面板外面松手 = 取消
@@ -466,6 +482,34 @@ public partial class PanelWindow
     }
 
     /// <summary>
+    /// <b>换层时作废拖拽上下文</b>（2026-10-01）。所有"进到另一层"的入口都要调它：
+    /// <c>Activate</c> 里组合 / 文件夹 Push 成功之后、<c>OpenHit</c> 里钻文件夹 / 进组合之后。
+    ///
+    /// 为什么必须作废：拖拽是<b>基于旧层的磁贴与顺序</b>的 —— <c>_dragTile</c> 指向旧层那枚对象、
+    /// <c>_dragOrder</c> 是旧层的显示顺序、位置判定用的也是旧层坐标。层一变这些全都失效，
+    /// 留着它的两个后果：
+    /// <list type="number">
+    ///   <item>双击进文件夹时，第二下**按住**期间手一抖（阈值只有
+    ///         <c>SystemParameters.Minimum*DragDistance</c>，150% DPI 下约 2.7 DIP），
+    ///         <c>ReorderMove</c> 就在<b>新层</b>上冒出一个属于旧层的幽灵磁贴；
+    ///         —— 进层以前发生在抬手时，<c>ReorderUp</c> 会先把它收干净，所以老代码看不到。</item>
+    ///   <item>松手后 <c>ReorderUp</c> 看到 <c>_dragActive</c> → 落到落盘分支，
+    ///         而它取的是<b>新层</b>的 <c>_shown</c>：文件夹层的 <c>_board.GroupId</c> 是 null，
+    ///         等于把文件夹里的条目 id 当成主界面顺序写进 state.json。<b>这条更严重。</b></item>
+    /// </list>
+    ///
+    /// <c>_suppressClick</c> 一并立起来：换层后紧接着的那次抬手不该再被当成点击 ——
+    /// 否则它落在新层的空白处就会被"点空白返回"（D10）立刻弹回去，白进一层。
+    /// 它会在下一次按下时被 <see cref="ReorderDown"/> 清掉，所以只影响这一次抬手。
+    /// </summary>
+    private void InvalidateDragForLayer()
+    {
+        DropDragState();
+        _pressOnTile = false;
+        _suppressClick = true;
+    }
+
+    /// <summary>
     /// 把两块磁贴并成一个新组合（用户说的"两个图标叠到一起就合并"）。
     ///
     /// 落盘只用现成的 <see cref="StateStore.CreateGroup"/>：它本来是为右键"新建组合"
@@ -531,61 +575,153 @@ public partial class PanelWindow
     }
 
     /// <summary>
-    /// 实时重排。光标落在目标的右半就插到它后面、左半插到前面 ——
-    /// 中线两侧就是用户要的"前后判定区"，中线附近另有一条
-    /// <see cref="InsertDeadZone"/> 的死带，避免停在中线上时来回翻（见 <see cref="InsertAfter"/>）。
+    /// <b>普通插入：按几何算出"插到第几位"，并就地预览移动。</b>
     ///
-    /// <b>所有层共用这一条</b>：二级界面（组合子界面）没有合并能力，
-    /// <see cref="DecideDrop"/> 会直接走到这里，整块磁贴都是排序区。
+    /// 为什么不问"光标压住了哪一块"（2026-10-01 重做）：命中测试只在光标压在某块磁贴上时
+    /// 才有答案 —— 列间/行间那 6px 缝隙是死区、行边界归属含糊（"差一格"的来源）、
+    /// 首尾之外干脆没有答案（上一版为此加过一个"划出去就插到最前"的吸附，
+    /// 结果在"想插到第二行第一个、手往左偏几像素"时把磁贴蹦到了全表第一个，见 README）。
+    /// 而拖动排序真正要回答的只有一个问题：<b>插到这条一维序列的第几位</b>
+    /// （左上 → 右下，一行满就顺延下一行）。这个问题纯几何就能答，而且答案唯一、连续、
+    /// 不随预览回流变化。
+    ///
+    /// 三条规则：
+    /// <list type="bullet">
+    ///   <item><b>行</b>：光标 Y 落在哪一行的带里（含 <see cref="RowSlack"/> 的宽容）。
+    ///         离所有行都太远就直接不插入 —— 拖到磁贴下方一大截的空白仍然什么都不做。</item>
+    ///   <item><b>列</b>：按列宽 + 间距换算，缝隙中点归到最近的那一列；首尾之外 clamp 到首/末列。
+    ///         注意是<b>那一行</b>的首/末列 —— 所以"在第二行里划到最左边"插的是第二行第一个，
+    ///         不会蹦到全表第一个。</item>
+    ///   <item><b>插前 / 插后</b>：光标在该格中线的左 / 右（甲方案：每行最后一格的右半边 =
+    ///         插到它后面 = 下一行的第一个）。中线附近另有 <see cref="InsertDeadZone"/> 的死带，
+    ///         沿用上一次的结论，免得停在中线上时来回翻。</item>
+    /// </list>
     /// </summary>
-    private void MoveInPreview(TileVm target, Rect? bounds, Point cursor)
+    private void SlotInsert(Point now)
+    {
+        if (_dragTile is null) return;
+        if (SlotGeometry() is not { } g) return;
+
+        if (now.Y < g.Top - RowSlack || now.Y > g.Bottom + RowSlack) return;
+
+        int row = g.RowAt(now.Y);
+        int col = Math.Clamp((int)Math.Floor((now.X + g.GapX / 2) / g.Stride), 0, g.Cols - 1);
+
+        double center = col * g.Stride + g.CellW / 2;
+        bool after = now.X > center;
+
+        int slot = row * g.Cols + col;
+        if (_insertSlot == slot && Math.Abs(now.X - center) <= InsertDeadZone)
+        {
+            after = _insertAfter;      // 死带：沿用上一次的结论
+        }
+        else
+        {
+            _insertSlot = slot;
+            _insertAfter = after;
+        }
+
+        MoveToSlot(slot, after);
+    }
+
+    /// <summary>行带的纵向宽容（DIP）。手横向划动时总带一点上下偏移，卡死在边界上会时灵时不灵。</summary>
+    private const double RowSlack = 12;
+
+    /// <summary>
+    /// 从<b>实际排列出来的矩形</b>反推槽位几何：列数、列宽、间距、每行的 y 范围。
+    ///
+    /// <b>不复述 <c>TilePanel</c> 的算法</b> —— 复述就等于养了第二份口径（改一处忘一处，
+    /// "拖拽幽灵漏掉预设线稿那一档"就是这么来的）；读它排完的结果，则永远与它对得上。
+    /// 代价是每次判定要把当前这些磁贴的矩形取一遍（十几块、每个一次 TransformToAncestor），
+    /// 相对拖动本身可以忽略；换来的是"几何永远是真话"。
+    /// </summary>
+    private SlotGeo? SlotGeometry()
+    {
+        var rects = new List<Rect>();
+        foreach (var t in _shown)
+            if (TileBounds(t) is { } b) rects.Add(b);
+        if (rects.Count == 0) return null;
+
+        // 行：排布是按索引来的，同一行的 Y 完全相同 —— Y 变了就是换行
+        var rows = new List<(double Top, double Bottom)>();
+        foreach (var r in rects)
+        {
+            if (rows.Count > 0 && Math.Abs(rows[^1].Top - r.Y) < 0.5) continue;
+            rows.Add((r.Y, r.Bottom));
+        }
+
+        var g = new SlotGeo { CellW = rects[0].Width, Rows = rows };
+        g.Cols = rects.Count(r => Math.Abs(r.Y - rows[0].Top) < 0.5);
+
+        // 间距：同一行里相邻两块的左边界之差 − 列宽（只有一块 / 只有一列时按 0 处理）
+        if (rects.Count > 1 && Math.Abs(rects[1].Y - rects[0].Y) < 0.5)
+            g.GapX = Math.Max(0, rects[1].X - rects[0].X - g.CellW);
+
+        g.Stride = g.CellW + g.GapX;
+        return g.Cols > 0 && g.Stride > 0 ? g : null;
+    }
+
+    /// <summary>把"第几位"落到列表上。<b>插入顺序的唯一出口</b>，索引换算只此一处。</summary>
+    private void MoveToSlot(int slot, bool after)
     {
         if (_dragTile is null) return;
 
         int from = _shown.IndexOf(_dragTile);
-        int to = _shown.IndexOf(target);
-        if (from < 0 || to < 0) return;
+        if (from < 0) return;
 
-        bool after = InsertAfter(target, bounds, cursor);
-        if (after) to++;
+        int to = slot + (after ? 1 : 0);
+        if (to > _shown.Count) to = _shown.Count;   // 划到末尾之外 → 夹到"最后"
 
         // 把源从列表里摘出来之后，它右边所有元素的索引都会左移一格
         if (from < to) to--;
 
         if (to == from) return;
-        if (to < 0 || to >= _shown.Count) return;
+        if (to < 0 || to >= _shown.Count) return;   // 越界（理论上到不了）就当没发生
 
         _shown.Move(from, to);
     }
 
-    /// <summary>
-    /// "插到目标后面还是前面" —— 判据是光标在目标的左半还是右半。
-    ///
-    /// 唯一的分界就是格子正中间，所以这里带一条 <see cref="InsertDeadZone"/> 的死带：
-    /// 光标停在目标中线附近的抖动（±1px）沿用上一次的结论，不然被拖的那块会在脚下来回跳。
-    /// 目标一换（或光标离开死带）就重新判。
-    /// </summary>
-    private bool InsertAfter(TileVm target, Rect? bounds, Point cursor)
+    /// <summary>槽位几何，见 <see cref="SlotGeometry"/>。</summary>
+    private sealed class SlotGeo
     {
-        if (bounds is not { } b) return false;
+        public int Cols;
+        public double CellW;
+        public double GapX;
+        public double Stride;
+        public List<(double Top, double Bottom)> Rows = new();
 
-        double mid = b.X + b.Width / 2;
+        public double Top => Rows[0].Top;
+        public double Bottom => Rows[^1].Bottom;
 
-        if (ReferenceEquals(_insertTarget, target) && Math.Abs(cursor.X - mid) <= InsertDeadZone)
-            return _insertAfter;
+        /// <summary>光标落在哪一行：在行间缝隙里归到下面那一行，超过末行归末行。</summary>
+        public int RowAt(double y)
+        {
+            for (int i = 0; i < Rows.Count; i++)
+                if (y <= Rows[i].Bottom) return i;
 
-        _insertTarget = target;
-        _insertAfter = cursor.X > mid;
-        return _insertAfter;
+            return Rows.Count - 1;
+        }
     }
 
     private TileVm? TileAt(Point inTiles) =>
         Tiles.InputHitTest(inTiles) is DependencyObject hit ? TileFrom(hit) : null;
 
-    private bool IsCursorInsideTiles()
+    /// <summary>
+    /// 光标是否还在<b>可落点区域</b>里 —— 出界就意味着"拖到面板外面松手 = 取消"。
+    ///
+    /// 2026-10-01 从 <c>Tiles</c> 的矩形改成 <c>Scroller</c>（滚动区）的矩形。
+    /// 两者之间还夹着 ScrollViewer 的 <c>Margin(12,10,6,0)</c> 与 <c>Padding(0,0,4,0)</c>，
+    /// 外加"磁贴不满一屏时下方那片空白"—— 这些地带原来一律算"出界"，
+    /// 于是想往最左/最右划出去时，稍微一偏就被切成取消。
+    ///
+    /// 现在这一类位置由 <see cref="SlotInsert"/> 的几何槽位接管 —— 它算的是
+    /// "**那一行**的首/末列"，所以不需要再额外解释"划出去 = 插到最前/最后"
+    /// （上一版正是那样特判的，结果"想插到第二行第一个、手往左偏几像素"会蹦到全表第一个）。
+    /// </summary>
+    private bool IsCursorInsideContentArea()
     {
-        var p = Mouse.GetPosition(Tiles);
-        return p.X >= 0 && p.Y >= 0 && p.X <= Tiles.ActualWidth && p.Y <= Tiles.ActualHeight;
+        var p = Mouse.GetPosition(Scroller);
+        return p.X >= 0 && p.Y >= 0 && p.X <= Scroller.ActualWidth && p.Y <= Scroller.ActualHeight;
     }
 
     /// <summary>磁贴在 <c>Tiles</c> 坐标系里的矩形；容器还没实现布局就返回 null。</summary>
@@ -625,18 +761,33 @@ public partial class PanelWindow
     /// 1px 以内（32→26/25、42→30/30、56→35.6/37），标签换成两行时最多偏 6.6px，
     /// 仍在圆内。用几何中心就会偏低十几像素，"叠图标"必须往下压才触发，手感是歪的。
     ///
-    /// <paramref name="ratio"/> 传 <see cref="MergeRadiusRatio"/> 是<b>进入</b>判定，
-    /// 传 <see cref="MergeExitRatio"/> 是<b>退出</b>判定（A 方案的迟滞：进去难、出来更难）。
+    /// <param name="scale">
+    /// 以<b>进入半径</b>为 1 的倍数：<b>进入</b>判定传 <c>1.0</c>，
+    /// <b>退出</b>判定传 <see cref="MergeExitRatio"/>（A 方案的迟滞：进去难、出来更难）。
+    /// </param>
     /// </summary>
-    private bool InsideMergeCircle(Point cursor, Rect bounds, double ratio)
+    private bool InsideMergeCircle(Point cursor, Rect bounds, double scale)
     {
         var c = CircleCenter(bounds);
-        double radius = Math.Max(MergeRadiusFloor, IconSize * ratio);
+        double radius = EnterRadius * scale;
 
         double dx = cursor.X - c.X;
         double dy = cursor.Y - c.Y;
         return dx * dx + dy * dy <= radius * radius;
     }
+
+    /// <summary>
+    /// 合并 / 并入判定圆的<b>进入半径</b>：图标边长 × <see cref="MergeRadiusRatio"/>，
+    /// 再兜一个下限。它是这套几何的基准 —— <b>退出半径 = 它 × <see cref="MergeExitRatio"/></b>。
+    ///
+    /// 2026-10-01 修的（这是真 bug）：原来退出半径直接算 <c>IconSize × MergeExitRatio</c>，
+    /// 42 档下是 <b>47px</b>；而注释与设计意图一直是"进 26px / 出 29px"（26 × 1.12）、
+    /// "最初写 1.3 时是出 34px"（26 × 1.3）—— <b>两处数字都证明该以"进入半径"为基数，
+    /// 公式漏了一次换算</b>。后果：迟滞带从 3px 撑到 21px，列宽 106 的格子里
+    /// 距列心 47px 的中段全成了"不许排序区"，只剩左右各 6px 能插入 ——
+    /// 这就是"最左/最右两块顶不掉、必须划到很边缘"的主因（实测见 README 与 drag-trace.log）。
+    /// </summary>
+    private double EnterRadius => Math.Max(MergeRadiusFloor, IconSize * MergeRadiusRatio);
 
     private void SetGroupHint(TileVm target)
     {
@@ -676,7 +827,7 @@ public partial class PanelWindow
         if (_dragTile is not null) _dragTile.Dragging = false;
         ClearHints();
         _decided = false;
-        _insertTarget = null;
+        _insertSlot = -1;
         if (Tiles.IsMouseCaptured) Tiles.ReleaseMouseCapture();
         _ghost?.HideGhost();
         _dragActive = false;

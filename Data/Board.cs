@@ -45,6 +45,19 @@ public sealed class TileVm : INotifyPropertyChanged
     /// <summary>拖放占位格：只画一圈虚线，没有路径、没有文字、不参与任何交互。</summary>
     public bool IsGhostTile => Kind == TileKind.Ghost;
 
+    /// <summary>
+    /// 这张磁贴要不要<b>双击</b>才执行（单击只选中、不做事）。
+    ///
+    /// 2026-10-01 起统一成一条：<b>会打开 / 进入某个东西的动作一律双击</b> ——
+    /// 文件、快捷方式、文件夹，以及「在资源管理器中打开」那个收尾格。
+    /// 只有<b>组合</b>保持单击（展开是可逆的导航动作，误触代价小）。
+    ///
+    /// 判定写在模型上、不写在各个鼠标处理器里：入口有三处（首页 <c>OnMouseUp</c> /
+    /// <c>OnDoubleClick</c>、搜索结果的单击 / 双击），口径必须只有一份 ——
+    /// 否则改一处就会漏一处，而漏掉的那处恰好是"手一滑就打开一堆程序"。
+    /// </summary>
+    public bool NeedsDoubleClick => Kind is TileKind.Shortcut or TileKind.Folder or TileKind.More;
+
     public bool HasCount => Count > 0;
 
     /// <summary>

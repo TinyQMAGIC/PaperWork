@@ -187,7 +187,11 @@ public sealed class StateStore
         if (i >= 0) State.Notes[i] = fresh;
     }
 
-    /// <summary>新建一条空备忘并立即落盘（新建是低频动作，不必去抖）。返回它供调用方打开编辑页。</summary>
+    /// <summary>
+    /// 新建一条备忘并立即落盘（新建是低频动作，不必去抖）。返回它供调用方继续写。
+    /// <b>只在真正敲进第一个字时才被调用</b>（<c>PanelWindow.PushEdit</c>）—— 点「＋」本身不再建，
+    /// 否则什么都没写就退出会留下一条空备忘（2026-10-01）。
+    /// </summary>
     public NoteItem AddNote()
     {
         var note = new NoteItem(NextId(), string.Empty, string.Empty, false, Now());

@@ -816,24 +816,57 @@ public partial class PanelWindow : Window
         // 不要重设 ItemsSource —— 那会丢掉搜索过滤结果并让磁贴闪一下。
         foreach (var t in _board.Tiles) t.Selected = ReferenceEquals(t, tile);
 
-        // 按草图的语义：组合栏和文件夹是"点一下就展开"，不需要双击。
-        // 快捷方式反过来——单击只选中，双击才运行，避免手滑打开一堆程序。
-        if (tile.Kind is TileKind.Group or TileKind.Folder or TileKind.More) Activate(tile);
+        // 单击只做"选中"，执行留给双击 —— 唯一的例外是组合。
+        //
+        // 2026-10-01 改的：原来只把"快捷方式"留给双击，组合/文件夹/收尾格单击即开。
+        // 现在统一成一条：**会打开 / 进入某个东西的动作一律双击**（文件、快捷方式、
+        // 文件夹、收尾格"在资源管理器中打开"），只有组合保持单击（展开可逆）。
+        //
+        // 判定收在 TileVm.NeedsDoubleClick 上，不要在这里写 Kind 判断 ——
+        // 入口有三处，口径只有一份才不会改漏（见那个属性的注释）。
+        //
+        // 拖放占位格先挡掉：它的文档写着"不参与任何交互"。原来那条 Kind 白名单天生漏过它，
+        // 换成 NeedsDoubleClick 之后（Ghost 不在其中）它会掉进下面这句 Activate ——
+        // 拿一条空路径去 ShellOps.Open。实际很难点到，但不该靠"难点到"活着。
+        if (tile.Kind == TileKind.Ghost) { e.Handled = true; return; }
+
+        if (!tile.NeedsDoubleClick) Activate(tile);
         e.Handled = true;
     }
 
     private static bool IsBlankArea(object source) =>
         source is DependencyObject d && (d is System.Windows.Controls.Border || d is Grid || d is ScrollViewer);
 
+    /// <summary>
+    /// 首页磁贴的双击：只对 <see cref="TileVm.NeedsDoubleClick"/> 的那些执行。
+    ///
+    /// 为什么要加这个判断（原来是无条件 <c>Activate</c>）：双击一枚<b>组合</b>时，
+    /// 第一下单击已经把它展开并重绘过了，第二下的 <c>MouseDoubleClick</c> 照样会打过来 ——
+    /// 而此刻光标下面已经是<b>新一层</b>的磁贴，无条件执行等于替用户又点了一次别的东西
+    /// （连进两层，甚至误开一个程序）。组合的单击已经处理完，这里必须让开。
+    ///
+    /// 搜索层不归这里管：搜索行的 DataContext 是 <c>SearchRowVm</c>，走到这儿
+    /// <c>TileFrom</c> 返回 null。但那是"侥幸无害"，显式挡掉更稳 ——
+    /// 以后有人往搜索行里塞了 TileVm，也不会被首页这条顺手执行掉。
+    /// </summary>
     private void OnDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        if (_searching) return;
+
         var tile = TileFrom(e.OriginalSource);
         if (tile is null) return;
+
+        if (!tile.NeedsDoubleClick) return;
+
         Activate(tile);
         e.Handled = true;
     }
 
-    /// <summary>组合/文件夹：单击即钻入。快捷方式：双击才打开，避免误触。</summary>
+    /// <summary>
+    /// 执行一枚磁贴。<b>要不要双击由调用点决定</b>：首页的单击 / 双击、搜索结果的单击 /
+    /// 双击都按 <see cref="TileVm.NeedsDoubleClick"/> 分流；右键菜单里的「打开」是明确意图，
+    /// 不设门槛（<c>OnTileRightDown</c>）。这里只管"执行"，不做门槛判断。
+    /// </summary>
     private void Activate(TileVm tile)
     {
         switch (tile.Kind)
@@ -844,6 +877,7 @@ public partial class PanelWindow : Window
                 // 否则界面闪一下又回到原样，看着像"点了没反应"
                 if (g is not null && _nav.Push(new NavFrame(NavKind.Group, gid, null, g.Title)))
                 {
+                    InvalidateDragForLayer();   // 换层 = 拖拽上下文作废（见那个方法的注释）
                     Render(animate: true);
                     ScheduleIcons();
                 }
@@ -869,6 +903,7 @@ public partial class PanelWindow : Window
 
                 if (_nav.Push(new NavFrame(NavKind.Folder, 0, tile.Path, System.IO.Path.GetFileName(tile.Path))))
                 {
+                    InvalidateDragForLayer();   // 换层 = 拖拽上下文作废（见那个方法的注释）
                     Render(animate: true);
                     ScheduleIcons();
                 }

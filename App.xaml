@@ -48,9 +48,15 @@
     <CornerRadius x:Key="PanelRadius">22</CornerRadius>
 
     <!-- 字体常量放在应用级，不放 PanelWindow：重命名对话框是另一个 Window，
-         窗口级资源取不到——飞出那棵视觉树之外的元素根本不在它的查找范围里。 -->
-    <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Segoe UI Mono</FontFamily>
-    <FontFamily x:Key="BookFont">Iowan Old Style, Palatino Linotype, Georgia, Segoe UI</FontFamily>
+         窗口级资源取不到——飞出那棵视觉树之外的元素根本不在它的查找范围里。
+
+         链尾一律补 `Microsoft YaHei`（2026-10-01）：前几个候选都是纯西文字体
+         （Palatino Linotype / Georgia / Segoe UI / Cascadia Mono / Consolas 都不含中日韩字形），
+         标题体与等宽体里的中文原来靠 WPF 系统回退，落点不由项目决定、也无法保证与界面体一致。
+         补在**最末**是关键：西文仍由前面的字体渲染，只有前面全都缺字形时才轮到雅黑，
+         所以英文观感零变化；中文则显式落到微软雅黑。 -->
+    <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Segoe UI Mono, Microsoft YaHei</FontFamily>
+    <FontFamily x:Key="BookFont">Iowan Old Style, Palatino Linotype, Georgia, Segoe UI, Microsoft YaHei</FontFamily>
 
     <!-- ============ ToolTip：纸张化（2026-09-28）============
          WPF 默认那个气泡是米黄底 + 纯黑直角边框，字体也不跟主题，悬停磁贴时尤其扎眼。
@@ -123,7 +129,7 @@
                                   RecognizesAccessKey="True"/>
                 <TextBlock x:Name="hint" Grid.Column="2" FontSize="10.5" Margin="14,0,0,0"
                            VerticalAlignment="Center" Foreground="{DynamicResource Ink3}"
-                           FontFamily="Cascadia Mono, Consolas" TextAlignment="Right"
+                           FontFamily="Cascadia Mono, Consolas, Microsoft YaHei" TextAlignment="Right"
                            Visibility="Collapsed"/>
                 <TextBlock x:Name="mark" Grid.Column="3" Text="&#xE765;" FontSize="10"
                            FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"

@@ -20,8 +20,20 @@ namespace Paperwork.Shell;
 /// </summary>
 public partial class PanelWindow
 {
-    /// <summary>当前正在编辑的备忘 id。0 = 不在编辑态。</summary>
+    /// <summary>
+    /// 当前正在编辑的备忘 id。
+    /// <b>0 = 草稿</b>（点了「＋」但一个字都没写，存储里还没有它）或不在编辑态。
+    /// 真正敲进第一个字时才建，见 <see cref="PushEdit"/>。
+    /// </summary>
     private int _editingNoteId;
+
+    /// <summary>
+    /// 正在往编辑框里填内容（<see cref="OpenEditor"/> 的赋值阶段）。
+    /// 那期间 <c>TextChanged</c> 触发的 <see cref="PushEdit"/> 必须整体忽略：
+    /// 填标题的那一刻正文还是<b>上一条备忘</b>的字，照当时那个画面写进去会串味。
+    /// 草稿态更要命 —— 那一下会被当成"用户敲了字"，凭空建出一条带着旧正文的备忘。
+    /// </summary>
+    private bool _fillingEditor;
 
     /// <summary>
     /// 备忘落盘去抖。实时保存意味着每敲一个键都会改内存，
@@ -42,6 +54,7 @@ public partial class PanelWindow
 
         MemoAdd.Click += (_, _) => CreateNote();
         MemoEmpty.Click += (_, _) => CreateNote();
+        MemoNewRow.Click += (_, _) => CreateNote();   // 列表末尾那行虚线入口，与 FAB / 空态同一个动作
 
         MemoList.PreviewMouseLeftButtonUp += OnNoteClick;
         MemoList.PreviewMouseRightButtonUp += OnNoteRightClick;
@@ -129,6 +142,8 @@ public partial class PanelWindow
 
         MemoList.ItemsSource = vms;
         MemoEmpty.Visibility = vms.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        // 与空态互斥：只有**有条目**时，列表末尾才给那行虚线新建入口
+        MemoNewRow.Visibility = vms.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
         MemoStatus.Text = $"{vms.Count} 条备忘 · 按最近更新";
     }
 
@@ -233,24 +248,32 @@ public partial class PanelWindow
 
     private void CreateNote()
     {
-        // 新建是低频动作，AddNote 内部直接落盘，不去抖
-        OpenEditor(_store.AddNote().Id);
+        // 不再一进来就建：AddNote 内部直接落盘，于是"点 ＋ 什么都没写就退出"
+        // 会在内存和磁盘上都留下一条空备忘（2026-10-01 修）。
+        // 改成打开**草稿**（id = 0）：真正敲进第一个字时才建，见 PushEdit。
+        OpenEditor(0);
     }
 
+    /// <param name="id">备忘 id。<b>0 = 草稿</b>（新建、还没写任何东西，存储里没有它）。</param>
     /// <param name="back">退出来回哪。默认回备忘列表；从搜索进来时传 <see cref="MemoReturn.Search"/>。</param>
     private void OpenEditor(int id, MemoReturn back = MemoReturn.List)
     {
-        var n = _store.Note(id);
-        if (n is null) return;
+        var n = id == 0 ? null : _store.Note(id);
+        if (id != 0 && n is null) return;
 
         _editingNoteId = id;
         _memoReturn = back;
 
-        // 给 Text 赋值会触发 TextChanged → PushEdit，但内容与存储一致时会提前返回，
-        // 不会产生一次多余的落盘
-        MemoTitle.Text = n.Title;
-        MemoBody.Text = n.Body;
-        MemoPin.IsChecked = n.Pinned;
+        // 赋值会触发 TextChanged → PushEdit：填标题的那一刻正文还是上一条备忘的字，
+        // 草稿态更会被当成"敲了字"凭空建出一条。所以填的整个过程屏蔽掉（见 _fillingEditor）。
+        _fillingEditor = true;
+        try
+        {
+            MemoTitle.Text = n?.Title ?? string.Empty;
+            MemoBody.Text = n?.Body ?? string.Empty;
+            MemoPin.IsChecked = n?.Pinned ?? false;
+        }
+        finally { _fillingEditor = false; }
 
         MemoPanel.Visibility = Visibility.Collapsed;
         MemoEditPanel.Visibility = Visibility.Visible;
@@ -263,7 +286,20 @@ public partial class PanelWindow
     private void CloseEditor()
     {
         PushEdit();
-        FlushNoteSave();
+
+        // 「空备忘不存在」（2026-10-01）：
+        //   · 草稿（id = 0）→ 压根没建过，什么都不用做；
+        //   · 已有的备忘被把标题和正文都删空了再退出 → 一并删掉。
+        //     不这么做的话，同一个问题换个入口（清空旧备忘）又冒出来一条空条目。
+        if (_editingNoteId != 0 && IsEditorBlank())
+        {
+            _noteSaveTimer?.Stop();             // 没有待写的内容了，别白写一次
+            _store.DeleteNote(_editingNoteId);  // 内部 Touch() 落盘
+        }
+        else
+        {
+            FlushNoteSave();
+        }
 
         _editingNoteId = 0;
         MemoEditPanel.Visibility = Visibility.Collapsed;
@@ -287,7 +323,13 @@ public partial class PanelWindow
 
     private void DeleteEditing()
     {
-        if (_editingNoteId == 0) return;
+        // 草稿态没有可删的东西：这一下等同于"丢弃草稿退出"。
+        // 按钮刻意不置灰 —— 按下去就该有反应，而不是让人怀疑自己点歪了。
+        if (_editingNoteId == 0)
+        {
+            CloseEditor();
+            return;
+        }
 
         _store.DeleteNote(_editingNoteId);
         _editingNoteId = 0;
@@ -311,7 +353,17 @@ public partial class PanelWindow
 
     private void PushEdit()
     {
-        if (_editingNoteId == 0) return;
+        if (_fillingEditor) return;
+
+        if (_editingNoteId == 0)
+        {
+            // 草稿：一个字都没写就不建 —— 什么都没写的备忘不该存在（见 CloseEditor）。
+            // 只写标题也算写了：那是用户明确留下的东西，照样建。
+            if (IsEditorBlank()) return;
+
+            // 真正敲进第一个字，此刻才落盘（AddNote 内部 Touch）—— 低频，不必去抖
+            _editingNoteId = _store.AddNote().Id;
+        }
 
         _store.UpdateNote(_editingNoteId, MemoTitle.Text, MemoBody.Text);
         UpdateEditStatus();
@@ -320,12 +372,22 @@ public partial class PanelWindow
 
     private void UpdateEditStatus()
     {
-        if (_editingNoteId == 0) return;
+        // 草稿：还没有这条备忘，自然没有字数和时间可报 —— 清空。
+        // 否则会留着上一条备忘的「N 字 · 时间」，指着一条不存在的备忘报数。
+        if (_editingNoteId == 0) { MemoEditStatus.Text = string.Empty; return; }
+
         var n = _store.Note(_editingNoteId);
         if (n is null) return;
 
         MemoEditStatus.Text = $"{n.Body.Length} 字 · {NoteVm.FormatTime(n.UpdatedAt)}";
     }
+
+    /// <summary>
+    /// 编辑框里是不是"什么都没写" —— 标题与正文都空（Trim 后）。
+    /// 只写标题也算写了：那是用户明确留下的东西，不能当空处理。
+    /// </summary>
+    private bool IsEditorBlank() =>
+        string.IsNullOrWhiteSpace(MemoTitle.Text) && string.IsNullOrWhiteSpace(MemoBody.Text);
 
     private void RequestNoteSave()
     {

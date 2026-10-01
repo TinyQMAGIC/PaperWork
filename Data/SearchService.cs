@@ -39,6 +39,13 @@ public sealed record SearchHit(
 {
     /// <summary>备忘：右端钉一个小标签，图形看不清时它是唯一能说明类型的信息。</summary>
     public bool IsNote => Kind == SearchHitKind.Note;
+
+    /// <summary>
+    /// 这一条要不要<b>双击</b>才执行。与 <c>TileVm.NeedsDoubleClick</c> 同一口径：
+    /// <b>条目一律双击</b> —— <c>Entry</c> 一条就同时覆盖了「文件」和「文件夹」
+    /// （不用再看 <see cref="IsDir"/>）；组合是展开、备忘是打开编辑页，都可逆，保持单击。
+    /// </summary>
+    public bool NeedsDoubleClick => Kind == SearchHitKind.Entry;
 }
 
 /// <summary>

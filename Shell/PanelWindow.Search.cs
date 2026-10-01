@@ -61,8 +61,18 @@ public partial class PanelWindow
         // 这样连着打字不会被 ListBox 抢走。
         SearchBox.PreviewKeyDown += OnSearchKeyDown;
 
-        // 点一条结果就执行。用 handledEventsToo=true：ListBoxItem 会把 MouseUp 吃掉。
+        // 单击只选中（ListBox 自己会选），**双击才执行** —— 与首页同一口径
+        // （TileVm.NeedsDoubleClick）。用 handledEventsToo=true：ListBoxItem 会把 MouseUp 吃掉。
         SearchList.AddHandler(MouseLeftButtonUpEvent, new MouseButtonEventHandler(OnSearchClick), true);
+
+        // 选中与执行都挂在 **MouseLeftButtonDown** 上（见 OnSearchRowDown）：
+        //   · 不用 MouseUp —— WPF 里 MouseUp 的 ClickCount 不足以当双击判据
+        //     （正因为它不可靠，WPF 才另有 MouseDoubleClick 这个事件）；
+        //   · 也不用 MouseDoubleClick —— 它是 Control 上的 **Direct** 路由事件，
+        //     双击命中的是 ListBoxItem，挂在 ListBox 上收不到（Direct 不往上冒）。
+        // MouseDown 的 ClickCount 才是可靠的那个（WPF 的双击判定本身发生在按下那一下）。
+        // handledEventsToo：ListBoxItem 会把这个事件吃掉。
+        SearchList.AddHandler(MouseLeftButtonDownEvent, new MouseButtonEventHandler(OnSearchRowDown), true);
 
         _searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); RunSearch(); };
@@ -195,7 +205,14 @@ public partial class PanelWindow
         SearchPanel.Visibility = Visibility.Visible;
         SearchEmpty.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
-        if (_rows.Count > 0) SearchList.SelectedIndex = 0;
+        // 默认**不预选**（2026-10-01）：高亮只该由鼠标悬停、用户点击或 ↑↓ 产生。
+        // 原来这里写的是 `if (_rows.Count > 0) SelectedIndex = 0;` —— 每出一批结果就
+        // 强行选中第一条，于是"还没操作就有东西亮着"；而悬停态与选中态又是同一套颜色
+        // （AccentSoft + AccentLine），鼠标一划过去就更分不清是谁亮。
+        // 集合重建本来就会清掉选中，这里显式写出来：哪天换成别的填充方式（比如逐条 Insert），
+        // 也不会又冒出一个"凭空亮着"的第一条。
+        // 回车那条快路径没丢 —— 见 OnSearchKeyDown 里"没选中就打开第一条"。
+        SearchList.SelectedIndex = -1;
 
         // 状态行只留两样：几项、Esc 返回。快捷键提示是多余的——用户要么已经会用，
         // 要么看一遍也不会记住，常年挂在角落里只是噪音。
@@ -254,7 +271,12 @@ public partial class PanelWindow
             case Key.Up: MoveSelection(-1); e.Handled = true; break;
 
             case Key.Enter:
-                if (SearchList.SelectedItem is SearchRowVm row) OpenHit(row.Hit);
+                // 默认不预选（见 ApplyResults），但"打字 → 回车"这条快路径不能一起丢掉：
+                // 没有选中项时打开**第一条**；用 ↑↓ 选过之后就按选中的那条走。
+                // 走到这里 _rows.Count 一定 > 0（本方法开头就挡掉了空结果）。
+                var enter = SearchList.SelectedItem as SearchRowVm
+                            ?? (_rows.Count > 0 ? _rows[0] : null);
+                if (enter is not null) OpenHit(enter.Hit);
                 e.Handled = true;
                 break;
 
@@ -280,15 +302,53 @@ public partial class PanelWindow
         SearchList.ScrollIntoView(SearchList.SelectedItem);
     }
 
+    /// <summary>
+    /// 搜索结果上的<b>单击抬起</b>：只管"单击即执行"的那些行 —— 组合与备忘
+    /// （它们的 <see cref="SearchHit.NeedsDoubleClick"/> 为 false）。文件 / 文件夹不在这里执行。
+    /// 选中已经在<b>按下</b>那一下做掉了，见 <see cref="OnSearchRowDown"/>。
+    ///
+    /// 仍要 <c>e.Handled = true</c>：窗口那条 <c>OnMouseUp</c> 在搜索态是"点空白即退出搜索"，
+    /// 虽然它也判了 <c>RowFrom</c>，但把 Handled 留住才是明说的意图 ——
+    /// 不吃掉就等于把这一下交给"算不算空白"去猜。
+    /// </summary>
     private void OnSearchClick(object sender, MouseButtonEventArgs e)
     {
         if (!_searching) return;
 
         if (RowFrom(e.OriginalSource) is { } row)
         {
-            OpenHit(row.Hit);
+            if (!row.Hit.NeedsDoubleClick) OpenHit(row.Hit);
             e.Handled = true;
         }
+    }
+
+    /// <summary>
+    /// 搜索结果行的<b>按下</b>：先选中（单击 = 高亮常亮），再判双击是否执行。
+    ///
+    /// <b>为什么必须自己设 <c>SelectedItem</c></b>（2026-10-01 修的）：列表项设了
+    /// <c>Focusable="False"</c>（为了让点完结果还能接着在搜索框里打字），
+    /// 而 WPF 的 <c>ListBoxItem</c> <b>在不可聚焦时压根不响应鼠标选中</b>。
+    /// 探针实测：同样的容器样式，`Focusable=false` 时合成一次 MouseDown → <c>SelectedIndex</c>
+    /// 仍是 -1、<c>IsSelected</c> 仍是 false；改成 `true` 立刻变成 0 / true。
+    /// 触发器本身没问题（手动置 `IsSelected` 后底色如期变色）。
+    /// 这也解释了右键菜单那条为什么要手动设 —— <c>SearchList.SelectedItem = row;</c>，
+    /// 当初撞的就是同一个坑。
+    ///
+    /// 双击按 <c>ClickCount</c> 判（MouseDown 的 ClickCount 才是可靠的那个），
+    /// 规则与首页一致：条目（文件 / 文件夹）双击，组合与备忘单击。
+    /// </summary>
+    private void OnSearchRowDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!_searching) return;
+        if (RowFrom(e.OriginalSource) is not { } row) return;
+
+        SearchList.SelectedItem = row;      // 单击 = 选中并常亮（不依赖 ListBoxItem 自己）
+
+        if (e.ClickCount < 2) return;
+        if (!row.Hit.NeedsDoubleClick) return;
+
+        OpenHit(row.Hit);
+        e.Handled = true;
     }
 
     /// <summary>
@@ -412,6 +472,8 @@ public partial class PanelWindow
                 var g = _store.Group(gid);
                 if (g is not null && _nav.Push(new NavFrame(NavKind.Group, gid, null, g.Title)))
                 {
+                    InvalidateDragForLayer();   // 换层 = 拖拽上下文作废（见那个方法的注释）
+
                     // 进层了就退搜索：搜索结果已经不属于这一层。
                     // 清空搜索栏同 RevealTile —— 留着旧词，下次呼出看着像还停在搜索里。
                     SearchBox.Clear();
@@ -435,6 +497,8 @@ public partial class PanelWindow
 
                     if (_nav.Push(new NavFrame(NavKind.Folder, 0, p, leaf)))
                     {
+                        InvalidateDragForLayer();   // 换层 = 拖拽上下文作废（见那个方法的注释）
+
                         // 钻进文件夹：同样清空搜索栏。跳到新的一层之后，
                         // 框里还留着刚才的词就是"半个搜索态"——界面不认，用户会以为还要搜
                         SearchBox.Clear();
