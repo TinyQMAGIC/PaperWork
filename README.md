@@ -242,13 +242,13 @@ Icons form **three layers**, each covering the one below:
 | `Paperwork-EN-0.1.0.exe`（英文界面）<br>English UI build | ≈ 66 MB | 同上<br>same as above |
 | `Paperwork-v0.1.0-portable.zip` | ≈ 230 KB | 解压后 4 个文件（约 0.6 MB），需要 **.NET 10 桌面运行时**<br>4 files (~0.6 MB) after unzipping; needs the **.NET 10 Desktop Runtime** |
 
-推荐使用`.exe`程序，这样不需要单独下载.net10桌面运行时
+推荐使用`.exe`程序，这样不需要单独下载.net10桌面运行时<br>
 I recommend using the `.exe` build — that way you don't need to download the .NET 10 Desktop Runtime.
 
-- 仅 x64，Windows 10 / 11。
+- 仅 x64，Windows 10 / 11。<br>
 **x64** only, Windows 10 / 11.
 
- .NET 10 桌面运行时可以访问微软官网或下述官方链接下载：
+ .NET 10 桌面运行时可以访问微软官网或下述官方链接下载：<br>
 The .NET 10 Desktop Runtime can be downloaded from the Microsoft official website or via the official link below:
 
 https://dotnet.microsoft.com/en-us/download/dotnet
