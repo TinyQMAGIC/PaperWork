@@ -238,16 +238,27 @@ Icons form **three layers**, each covering the one below:
 
 | 产物 / Artifact | 大小 / Size | 需要什么 / Needs |
 |---|---|---|
-| `Paperwork-CN-0.1.0.exe`（中文界面）<br>Chinese UI build | 约 66 MB<br>≈ 66 MB | 双击即用，自带 .NET 运行时<br>double-click, .NET runtime included |
-| `Paperwork-EN-0.1.0.exe`（英文界面）<br>English UI build | 约 66 MB<br>≈ 66 MB | 同上<br>same as above |
-| `Paperwork-v0.1.0-portable.zip` | 约 230 KB<br>≈ 230 KB | 解压后 4 个文件（约 0.6 MB），需要 **.NET 10 桌面运行时**<br>4 files (~0.6 MB) after unzipping; needs the **.NET 10 Desktop Runtime** |
+| `Paperwork-CN-0.1.0.exe`（中文界面）<br>Chinese UI build | ≈ 66 MB | 双击即用，自带 .NET 运行时<br>double-click, .NET runtime included |
+| `Paperwork-EN-0.1.0.exe`（英文界面）<br>English UI build | ≈ 66 MB | 同上<br>same as above |
+| `Paperwork-v0.1.0-portable.zip` | ≈ 230 KB | 解压后 4 个文件（约 0.6 MB），需要 **.NET 10 桌面运行时**<br>4 files (~0.6 MB) after unzipping; needs the **.NET 10 Desktop Runtime** |
 
-- 仅 **x64**，Windows 10 / 11。<br>
-  **x64** only, Windows 10 / 11.
+推荐使用`.exe`程序，这样不需要单独下载.net10桌面运行时
+I recommend using the `.exe` build — that way you don't need to download the .NET 10 Desktop Runtime.
+
+- 仅 x64，Windows 10 / 11。
+**x64** only, Windows 10 / 11.
+
+ .NET 10 桌面运行时可以访问微软官网或下述官方链接下载：
+The .NET 10 Desktop Runtime can be downloaded from the Microsoft official website or via the official link below:
+
+https://dotnet.microsoft.com/en-us/download/dotnet
+
 - 中英是**两套编译产物**（界面文案是编译期常量，不是运行时切换）——想要另一种界面就换那个 exe。<br>
   Chinese and English are **two separate builds** (UI strings are compile-time constants, not a runtime switch) — pick the exe you want.
+  
 - ⚠️ **不要用管理员身份运行**。Windows 的 UIPI 会阻断资源管理器向提权进程拖放文件，而"把文件拖进来"是它的核心功能；程序检测到自己被提权时会弹托盘气泡提醒你。<br>
   ⚠️ **Do not run it as administrator.** Windows UIPI blocks drag-and-drop from Explorer into an elevated process, which breaks the core feature. Paperwork notices elevation and warns you via a tray balloon.
+  
 - 从托盘右键「退出」才是真的退出；卸载就是删掉 exe（和你想留就留的 `UserData\`）。<br>
   Only *Exit* in the tray menu really quits. Uninstalling means deleting the exe (and the `UserData\` folder, if you want it gone).
 
