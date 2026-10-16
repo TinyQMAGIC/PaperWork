@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using Paperwork.Data;   // Str：菜单失败原因（会经状态栏给用户看到）
 
 namespace Paperwork.Shell;
 
@@ -67,6 +68,9 @@ public static class NativeContextMenu
     private const uint WM_MEASUREITEM = 0x002C;
     private const uint WM_MENUCHAR = 0x0120;
 
+    /// <summary>正常显示。nShow 留 0 是 SW_HIDE，见 <see cref="CMINVOKECOMMANDINFO"/> 的注释。</summary>
+    private const int SW_SHOWNORMAL = 1;
+
     private static readonly Guid ShellFolderIID = new("000214e6-0000-0000-c000-000000000046");
     private static readonly Guid ContextMenuIID = new("000214e4-0000-0000-c000-000000000046");
     private static readonly Guid ContextMenu3IID = new("bcfce0a0-ec17-11d0-8d10-00a0c90f2719");
@@ -119,6 +123,16 @@ public static class NativeContextMenu
     [DllImport("user32.dll")]
     private static extern IntPtr GetDesktopWindow();
 
+    /// <summary>
+    /// 字段必须与 native 逐格对齐（x64 偏移 0/4/8/16/24/32/40/44/48，总长 56，已用
+    /// Marshal.OffsetOf 实测核对）。
+    ///
+    /// 原来<b>少声明了 <c>dwHotKey</c></b>，于是名叫 <c>icon</c> 的那格落在 native 的
+    /// <c>nShow</c> 上（偏移 40）、<c>hInst</c> 落在 <c>hIcon</c> 上（48），44 那格成了隐式填充。
+    /// 总长恰好还是 56，callee 正常接受、不崩 —— 纯粹是参数错：<c>nShow</c> 恒为 0 = SW_HIDE，
+    /// shell32 的规范动词走 <c>ShellExecuteEx(ici.nShow)</c> 那条路时进程可能以隐藏窗口启动。
+    /// 旧名字也是帮凶：叫 icon / hInst 完全看不出中间缺了一格，这个错才藏了这么久。
+    /// </summary>
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
     private struct CMINVOKECOMMANDINFO
     {
@@ -128,8 +142,9 @@ public static class NativeContextMenu
         public IntPtr verb;
         public IntPtr parameters;
         public IntPtr directory;
-        public int icon;
-        public IntPtr hInst;
+        public int nShow;
+        public int dwHotKey;
+        public IntPtr hIcon;
     }
 
     internal static string LastFailure { get; private set; } = string.Empty;
@@ -159,6 +174,13 @@ public static class NativeContextMenu
     /// <summary>
     /// Win11 原生菜单的 owner-draw 条目靠这四条消息画自己。消息发给 hwndOwner，
     /// 所以必须由宿主窗口的 WndProc 转进来。返回 true 表示消息已被消费，宿主应回 handled。
+    ///
+    /// <b>必须包 try。</b>这里是<b>直调第三方 shell 扩展</b>的 <c>HandleMenuMsg2</c>，
+    /// 而调用点在 <c>PanelWindow.WndProc</c> 上、外面一层 catch 都没有 —— 扩展抛一个托管异常
+    /// 就是整进程崩。挡不住的仍有两类（说清楚，别以为加了 catch 就万事大吉）：
+    /// 扩展在 native 里 AV，以及 <see cref="Slot{T}"/> 之外的封送层故障；
+    /// 那两类只能靠"把原生菜单隔离到独立进程"根治，代价远大于收益。
+    /// 加这一层至少把"某个扩展写得不好"降级成"这一条菜单消息没画出来"。
     /// </summary>
     public static bool HandleMenuMessage(uint msg, IntPtr wParam, IntPtr lParam, out IntPtr result)
     {
@@ -166,9 +188,18 @@ public static class NativeContextMenu
         if (_liveCm3 == IntPtr.Zero) return false;
         if (msg is not (WM_INITMENUPOPUP or WM_DRAWITEM or WM_MEASUREITEM or WM_MENUCHAR)) return false;
 
-        int hr = Slot<HandleMenuMsg2Del>(_liveCm3, ContextMenu3_HandleMenuMsg2)(
-            _liveCm3, msg, wParam, lParam, out result);
-        return hr == 0;
+        try
+        {
+            int hr = Slot<HandleMenuMsg2Del>(_liveCm3, ContextMenu3_HandleMenuMsg2)(
+                _liveCm3, msg, wParam, lParam, out result);
+            return hr == 0;
+        }
+        catch (Exception ex)
+        {
+            LastFailure = $"HandleMenuMsg2 {ex.GetType().Name}";
+            result = IntPtr.Zero;
+            return false;
+        }
     }
 
     /// <summary>
@@ -237,6 +268,18 @@ public static class NativeContextMenu
                                      screenX, screenY, 0, ownerHwnd, IntPtr.Zero);
             _ = PostMessage(ownerHwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero);
 
+            // 菜单已经关了，**立刻**摘掉转发目标，不要等 finally。
+            // 下面这句 InvokeCommand 是可能泵消息的（扩展弹进度框 / 确认框 / 冲突提示），
+            // 而这段时间里 _liveCm3 还指着那个 HMENU 已经销毁的 IContextMenu3 ——
+            // 继续往它转发 WM_DRAWITEM / WM_MEASUREITEM，等于让扩展对着一个不存在的菜单画东西。
+            //
+            // 但**只清 _liveCm3，不动 _menuActive**：后者不只是"菜单正弹着"，它还是
+            // 「全屏应用时自动收起」的唯一守卫（IsLive → PanelWindow 那边读它）。
+            // 清早了的话，扩展这会儿弹出的进度框 / UAC 框期间就不再被当成"有模态框在前"，
+            // 用户切到全屏应用会把面板收起来，而扩展的对话框还开着。
+            // _menuActive 交给下面的 finally 统一清。
+            _liveCm3 = IntPtr.Zero;
+
             if (cmd <= 0) return false;
 
             Invoke(contextMenu, ownerHwnd, (uint)(cmd - 1));
@@ -258,6 +301,13 @@ public static class NativeContextMenu
     }
 
     /// <summary>路径 → PIDL → 父 IShellFolder → IContextMenu → 填好 hMenu。</summary>
+    /// <remarks>
+    /// <b>失败路径上谁创建谁清理。</b>原来 <c>menu</c>（HMENU）和 <c>contextMenu</c>（COM 引用）
+    /// 只在 TryShow / Probe 的<b>成功</b>路径上被销毁/释放，失败路径直接 return ——
+    /// 于是每次某个 shell 扩展 QueryContextMenu 失败（装了失效第三方扩展的机器上很常见）
+    /// 就泄一个 USER 句柄加一个 COM 引用，反复右键累积。
+    /// 所以这里改成单出口：成功才把两件事交给调用方，失败在方法内清干净。
+    /// </remarks>
     private static bool Build(
         string path, IntPtr ownerHwnd, out IntPtr menu, ref IntPtr contextMenu, out string failure)
     {
@@ -268,6 +318,7 @@ public static class NativeContextMenu
         IntPtr parent = IntPtr.Zero;
         IntPtr childPidl = IntPtr.Zero;
         IntPtr apidlBlock = IntPtr.Zero;
+        bool ok = false;
 
         try
         {
@@ -277,49 +328,45 @@ public static class NativeContextMenu
             fullPidl = ILCreateFromPathW(path);
             if (fullPidl == IntPtr.Zero)
             {
-                failure = "ILCreateFromPathW 返回空";
-                return false;
+                failure = Str.LogIlCreateNull;
             }
-
-            Guid folderIid = ShellFolderIID;
-            int hrBind = SHBindToParent(fullPidl, ref folderIid, out parent, out childPidl);
-            if (hrBind != 0 || parent == IntPtr.Zero || childPidl == IntPtr.Zero)
+            else
             {
-                failure = $"SHBindToParent hr=0x{hrBind:x8}";
-                return false;
+                Guid folderIid = ShellFolderIID;
+                int hrBind = SHBindToParent(fullPidl, ref folderIid, out parent, out childPidl);
+                if (hrBind != 0 || parent == IntPtr.Zero || childPidl == IntPtr.Zero)
+                {
+                    failure = $"SHBindToParent hr=0x{hrBind:x8}";
+                }
+                else
+                {
+                    // apidl 是「PIDL 指针的数组」，手工分配一个指针大小的块
+                    apidlBlock = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(apidlBlock, childPidl);
+
+                    Guid cmIid = ContextMenuIID;
+                    uint reservedFlags = 0;
+                    int hrUi = Slot<GetUIObjectOfDel>(parent, ShellFolder_GetUIObjectOf)(
+                        parent, ownerHwnd, 1, apidlBlock, cmIid, ref reservedFlags, out contextMenu);
+                    if (hrUi != 0 || contextMenu == IntPtr.Zero)
+                    {
+                        failure = $"GetUIObjectOf hr=0x{hrUi:x8}";
+                    }
+                    else
+                    {
+                        menu = CreatePopupMenu();
+                        int inserted = Slot<QueryContextMenuDel>(contextMenu, ContextMenu_QueryContextMenu)(
+                            contextMenu, menu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME);
+
+                        if (inserted < 0) failure = $"QueryContextMenu hr=0x{inserted:x8}";
+                        else { LastVerbCount = inserted; ok = true; }
+                    }
+                }
             }
-
-            // apidl 是「PIDL 指针的数组」，手工分配一个指针大小的块
-            apidlBlock = Marshal.AllocHGlobal(IntPtr.Size);
-            Marshal.WriteIntPtr(apidlBlock, childPidl);
-
-            Guid cmIid = ContextMenuIID;
-            uint reservedFlags = 0;
-            int hrUi = Slot<GetUIObjectOfDel>(parent, ShellFolder_GetUIObjectOf)(
-                parent, ownerHwnd, 1, apidlBlock, cmIid, ref reservedFlags, out contextMenu);
-            if (hrUi != 0 || contextMenu == IntPtr.Zero)
-            {
-                failure = $"GetUIObjectOf hr=0x{hrUi:x8}";
-                return false;
-            }
-
-            menu = CreatePopupMenu();
-            int inserted = Slot<QueryContextMenuDel>(contextMenu, ContextMenu_QueryContextMenu)(
-                contextMenu, menu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME);
-
-            if (inserted < 0)
-            {
-                failure = $"QueryContextMenu hr=0x{inserted:x8}";
-                return false;
-            }
-
-            LastVerbCount = inserted;
-            return true;
         }
         catch (Exception ex)
         {
             failure = ex.GetType().Name;
-            return false;
         }
         finally
         {
@@ -329,6 +376,13 @@ public static class NativeContextMenu
             if (parent != IntPtr.Zero) _ = Marshal.Release(parent);
             if (fullPidl != IntPtr.Zero) ILFree(fullPidl);
         }
+
+        if (!ok)
+        {
+            if (menu != IntPtr.Zero) { _ = DestroyMenu(menu); menu = IntPtr.Zero; }
+            if (contextMenu != IntPtr.Zero) { _ = Marshal.Release(contextMenu); contextMenu = IntPtr.Zero; }
+        }
+        return ok;
     }
 
     /// <summary>
@@ -341,15 +395,15 @@ public static class NativeContextMenu
     private static T Slot<T>(IntPtr unknown, int slot) where T : Delegate
     {
         if (unknown == IntPtr.Zero)
-            throw new InvalidOperationException($"Slot({slot}): IUnknown 指针为空");
+            throw new InvalidOperationException(string.Format(Str.LogSlotIUnknownNull, slot));
 
         IntPtr vtbl = Marshal.ReadIntPtr(unknown);
         if (vtbl == IntPtr.Zero)
-            throw new InvalidOperationException($"Slot({slot}): vtable 指针为空");
+            throw new InvalidOperationException(string.Format(Str.LogSlotVtableNull, slot));
 
         IntPtr fn = Marshal.ReadIntPtr(vtbl, slot * IntPtr.Size);
         if (fn == IntPtr.Zero)
-            throw new InvalidOperationException($"Slot({slot}): 该对象的 vtable 没这么深，槽号有误");
+            throw new InvalidOperationException(string.Format(Str.LogSlotVtableShallow, slot));
 
         return Marshal.GetDelegateForFunctionPointer<T>(fn);
     }
@@ -362,7 +416,8 @@ public static class NativeContextMenu
             cbSize = Marshal.SizeOf<CMINVOKECOMMANDINFO>(),
             fMask = 0,
             hwnd = ownerHwnd,
-            verb = new IntPtr(verbId)
+            verb = new IntPtr(verbId),
+            nShow = SW_SHOWNORMAL
         };
         Slot<InvokeCommandDel>(contextMenu, ContextMenu_InvokeCommand)(contextMenu, ref info);
     }

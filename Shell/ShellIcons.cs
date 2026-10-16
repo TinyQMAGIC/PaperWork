@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using Paperwork.Data;   // Str：失效原因也会显示在磁贴悬停提示上
 
 namespace Paperwork.Shell;
 
@@ -35,6 +36,9 @@ public static class ShellIcons
 
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
     private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+
+    /// <summary>Win32 存在性检查的上限。超过它且查不到时不判死，见 Query 里那段注释。</summary>
+    private const int MaxPath = 260;
 
     private static readonly Guid ShellItemIID = new("43826d1e-e718-42ee-bc55-a1e261c37bfe");
 
@@ -130,6 +134,16 @@ public static class ShellIcons
         }
         catch (Exception) { /* 无权限或路径非法，按不存在处理 */ }
 
+        // 超过 MAX_PATH 的路径：manifest 没有 longPathAware、机器也没开 LongPathsEnabled 时，
+        // Win32 的存在性检查一律返回 false —— 于是深层目录（node_modules、OneDrive 深目录）
+        // 里的文件会被误判成「已被删除或移动」并永久变灰，图标也永不刷新。
+        // 用户拍板：不收长路径、也不加 \\?\ 前缀（那套不自动规范化，还要绕开 Shell 调用），
+        // 所以这里只做**放宽** —— 超长且查不到时不判死，按「存在但不取图」处理，
+        // 磁贴保持正常外观，而不是顶着一句错的失效原因。
+        if (!exists && path.Length > MaxPath)
+            return new Pending(IntPtr.Zero, HandleKind.None,
+                               Path.GetFileName(path.TrimEnd('\\', '/')), string.Empty, true, null);
+
         var shfi = default(SHFILEINFO);
         uint flags = SHGFI_TYPENAME | SHGFI_DISPLAYNAME | (exists ? 0u : SHGFI_USEFILEATTRIBUTES)
                    | (targetPx <= 20 ? SHGFI_SMALLICON : SHGFI_LARGEICON);
@@ -163,7 +177,7 @@ public static class ShellIcons
             SHCreateItemFromParsingName(path, IntPtr.Zero, ref iid, out item);
             if (item is null)
             {
-                LastFailure = "SHCreateItemFromParsingName 没给回 IShellItem";
+                LastFailure = Str.LogShellItemNull;
                 return IntPtr.Zero;
             }
 
@@ -254,19 +268,19 @@ public static class ShellIcons
     {
         try
         {
-            if (path.StartsWith(@"\\", StringComparison.Ordinal)) return "网络位置当前不可用";
+            if (path.StartsWith(@"\\", StringComparison.Ordinal)) return Str.LogNetUnavailable;
 
             string? root = Path.GetPathRoot(path);
-            if (!string.IsNullOrEmpty(root) && !Directory.Exists(root)) return $"驱动器 {root} 当前不可用";
+            if (!string.IsNullOrEmpty(root) && !Directory.Exists(root)) return string.Format(Str.LogDriveUnavailable, root);
 
             string? parent = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(parent) && !Directory.Exists(parent)) return "上级文件夹已不存在";
+            if (!string.IsNullOrEmpty(parent) && !Directory.Exists(parent)) return Str.LogParentGone;
         }
         catch (ArgumentException)
         {
-            return "路径格式无效";
+            return Str.LogBadPathFormat;
         }
 
-        return "已被删除或移动";
+        return Str.LogDeletedOrMoved;
     }
 }

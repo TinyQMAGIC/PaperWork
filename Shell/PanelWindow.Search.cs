@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.IO;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -96,6 +96,16 @@ public partial class PanelWindow
     {
         if (!SearchBox.IsKeyboardFocusWithin) return;      // 框本来就没焦点，什么都不用做
         if (IsInsideTextInput(e.OriginalSource)) return;   // 点回搜索框（或别的输入框）别抢
+
+        // 搜索态下，点在结果区里（结果行、滚动条、列表下方那片空白）一律**不抢焦点**。
+        //
+        // 抢了之后 ↑↓ / Enter / 继续打字全部失效 —— OnSearchKeyDown 是挂在搜索框上的，
+        // 焦点一移到 MainRoot 就再也收不到按键；而 RunSearch 只在「首次进搜索」时补一次
+        // 焦点（那里是 if (first && ...)），点完结果行 _searching 已经是 true，不会补回来。
+        // 于是"点一下结果，键盘就死了"，与本文件开头写的设计声明（焦点始终留在框里）直接冲突。
+        //
+        // 退出搜索不受影响：那条路由 OnMouseUp 的「点空白即退出搜索」负责，语义不变。
+        if (_searching && IsWithin(e.OriginalSource, SearchPanel)) return;
 
         BlurSearchBox();
     }
@@ -195,9 +205,13 @@ public partial class PanelWindow
             }
         }
 
-        // 目标像素与磁贴用同一档：缓存键含尺寸，同档才能命中首页已经取过的那一份
+        // 目标像素与磁贴用**同一档**：缓存键含尺寸，同档才能命中首页已经取过的那一份。
+        // 必须是 ArtSize（= round(IconSize × 0.8)，见 OnIconSizeChanged）而不是 IconSize ——
+        // 磁贴那边唯一的入口 ScheduleIcons 用的就是 ArtSize，写 IconSize 会整整差那 20%
+        // （42 档 → 42 vs 34），于是每次搜索都对所有结果重新发起一轮 Shell 查询；
+        // 而结果行里的 Image 是写死的 18×18，多解码出来的那些像素连显示都不会显示。
         if (probes.Count > 0)
-            _icons?.Enqueue(probes, (int)Math.Round(IconSize * DpiScaleX));
+            _icons?.Enqueue(probes, (int)Math.Round(ArtSize * DpiScaleX));
 
         // 磁贴区与它的空态都让位：两者都在第 4 行，叠着会出现"结果上面压着一圈虚线"
         Scroller.Visibility = Visibility.Collapsed;
@@ -216,8 +230,8 @@ public partial class PanelWindow
 
         // 状态行只留两样：几项、Esc 返回。快捷键提示是多余的——用户要么已经会用，
         // 要么看一遍也不会记住，常年挂在角落里只是噪音。
-        string more = total > hits.Count ? $"（还有 {total - hits.Count} 项）" : string.Empty;
-        SearchStatus.Text = _rows.Count == 0 ? "0 项 · Esc 返回" : $"{total} 项{more} · Esc 返回";
+        string more = total > hits.Count ? string.Format(Str.SearchMoreSuffix, total - hits.Count) : string.Empty;
+        SearchStatus.Text = _rows.Count == 0 ? Str.SearchCountZero : string.Format(Str.SearchCount, total, more);
 
         // 左上角换成 Paperwork / Search（位置与首页标题一致）
         BuildBreadcrumb();
@@ -393,19 +407,19 @@ public partial class PanelWindow
         // 文件夹没有"运行"这回事；组合是面板自造的概念，磁盘上没有对应物
         if (hit.Kind == SearchHitKind.Entry && !hit.IsDir && hit.Path is string p)
         {
-            menu.Items.Add(MenuItem("以管理员身份运行", () =>
+            menu.Items.Add(MenuItem(Str.MenuRunAsAdmin, () =>
             {
                 if (!ShellOps.Open(p, elevated: true, out string err)) Status(err);
             }));
         }
 
-        menu.Items.Add(MenuItem("打开磁贴位置", () => RevealTile(hit)));
+        menu.Items.Add(MenuItem(Str.MenuOpenTileLocation, () => RevealTile(hit)));
 
         if (hit.Kind == SearchHitKind.Entry && !string.IsNullOrWhiteSpace(hit.Path))
         {
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem("打开文件位置", () => ShellOps.OpenInExplorer(null, hit.Path!)));
-            menu.Items.Add(MenuItem("资源管理器菜单", () => ShowNativeMenu(hit.Path!)));
+            menu.Items.Add(MenuItem(Str.MenuOpenFileLocation, () => ShellOps.OpenInExplorer(null, hit.Path!)));
+            menu.Items.Add(MenuItem(Str.MenuExplorerMenu, () => ShowNativeMenu(hit.Path!)));
         }
 
         MarkMenuEdges(menu);
@@ -444,22 +458,21 @@ public partial class PanelWindow
 
         Render(animate: true);
         ScheduleIcons();
-        SelectTileAfterReveal(entryId, groupId);
+        SelectTileAfterReveal(entryId);
     }
 
     /// <summary>
     /// 跳转之后把那一块选中。<c>TileVm.Selected</c> 有模板里的视觉反馈，
     /// 直接改它而不是重设 ItemsSource（后者会让磁贴整体闪一下，见 OnMouseUp 那段注释）。
+    ///
+    /// 只认条目：<b>组合命中没有可选项</b> —— RevealTile 对组合是 Push 进那一层，
+    /// 渲染出来的是组内条目，而 <c>BoardBuilder.FromEntry</c> 从不给 TileVm 填 GroupId，
+    /// 于是「在新一层里找 GroupId == 该组合」永远匹配不到、target 恒为 null。
+    /// 原来那条分支是死逻辑，删掉；组合跳转的"跳过去了"由进入该层本身表达。
     /// </summary>
-    private void SelectTileAfterReveal(int? entryId, int? groupId)
+    private void SelectTileAfterReveal(int? entryId)
     {
-        TileVm? target = null;
-        foreach (var t in _board.Tiles)
-        {
-            bool match = entryId is int e ? t.EntryId == e : t.GroupId == groupId;
-            if (match) target = t;
-        }
-
+        TileVm? target = entryId is int e ? _board.Tiles.FirstOrDefault(t => t.EntryId == e) : null;
         foreach (var t in _board.Tiles) t.Selected = ReferenceEquals(t, target);
     }
 
@@ -481,19 +494,21 @@ public partial class PanelWindow
                     Render(animate: true);
                     ScheduleIcons();
                 }
-                else Say("已经到最里一层了");
+                else Say(Str.StatusAtDeepest);
                 break;
 
             case SearchHitKind.Entry when hit.Path is string p:
                 if (hit.IsDir)
                 {
                     // 文件夹磁贴：和首页点它一样是钻进去；到栈底了交给资源管理器
-                    if (!StateStore.SafeIsDirectory(p)) { Say("该文件夹当前不可访问"); break; }
+                    if (!StateStore.SafeIsDirectory(p)) { Say(Str.StatusFolderUnreachable); break; }
 
                     if (_nav.AtMaxDepth) { ShellOps.OpenInExplorer(p, select: null); break; }
 
-                    string leaf = Path.GetFileName(p.TrimEnd('\\', '/'));
-                    if (string.IsNullOrEmpty(leaf)) leaf = p;
+                    // 与首页 Activate 那条同一个口径：盘符根用 GetFileName 会给空串
+                    // （GetFileName(@"C:\") == ""），原来这里靠自己 TrimEnd + 回落兜、
+                    // 首页那边没兜 —— 同一个动作两处各推一遍，就是"改一处漏一处"的来源。
+                    string leaf = BoardBuilder.DeriveName(p, isDir: true);
 
                     if (_nav.Push(new NavFrame(NavKind.Folder, 0, p, leaf)))
                     {

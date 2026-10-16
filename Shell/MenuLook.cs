@@ -133,17 +133,29 @@ internal static class MenuLook
 /// </summary>
 internal static class MenuIcons
 {
+    /// <summary>
+    /// 解析并<b>立即冻结</b>。理由与 <c>Glyphs.Frozen</c> 完全相同（未冻结的 Freezable 有线程
+    /// 亲和性，而静态字段归"谁先碰到这个类型"所有），只是这边刻意不复用 <c>Glyphs</c> 那套
+    /// —— 上面已经写明这里是"动作"图形、不是文件类型图形，两边连数据都不该共享。
+    /// </summary>
+    private static Geometry Frozen(string markup)
+    {
+        var g = Geometry.Parse(markup);
+        g.Freeze();
+        return g;
+    }
+
     /// <summary>面板：一张矩形纸 + 顶部标题条。</summary>
-    public static readonly Geometry Panel = Geometry.Parse(
+    public static readonly Geometry Panel = Frozen(
         "M 5.6,4 H 18.4 A 2.4,2.4 0 0 1 20.8,6.4 V 17.6 A 2.4,2.4 0 0 1 18.4,20 H 5.6 A 2.4,2.4 0 0 1 3.2,17.6 V 6.4 A 2.4,2.4 0 0 1 5.6,4 Z  M 3.2 8.4 H 20.8");
 
     /// <summary>设置：三根滑杆 + 错位旋钮（2026-09-29 换掉原来那颗齿轮）。</summary>
-    public static readonly Geometry Sliders = Geometry.Parse(
+    public static readonly Geometry Sliders = Frozen(
         "M 4,6.8 H 7.7  M 11.5,6.8 H 20  M 9.6,4.9 A 1.9,1.9 0 1 1 9.59,4.9 Z" +
         "M 4,12 H 13.7  M 17.5,12 H 20  M 15.6,10.1 A 1.9,1.9 0 1 1 15.59,10.1 Z" +
         "M 4,17.2 H 5.7  M 9.5,17.2 H 20  M 7.6,15.3 A 1.9,1.9 0 1 1 7.59,15.3 Z");
 
     /// <summary>电源：一竖 + 一个开口向上的弧（退出）。</summary>
-    public static readonly Geometry Power = Geometry.Parse(
+    public static readonly Geometry Power = Frozen(
         "M 12,3.4 V 12  M 7.2,7.4 A 7.6,7.6 0 1 0 16.8,7.4");
 }

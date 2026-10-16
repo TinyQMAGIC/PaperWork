@@ -211,8 +211,13 @@
 
     <!-- ============ 重命名对话框：两个按钮 ============
          不能合成一个模板：两枚按钮的悬停色各走各的（主题色 → AccentStrong 再压一档，
-         幽灵钮 → 纸底），写死在模板里得再 branch 一次，分两支反而更直白。
-         模板不做 IsMouseOver 缩放——放了会让相邻按钮的位置跟着抖。 -->
+         纸底钮 → Rule 再深一档），写死在模板里得再 branch 一次，分两支反而更直白。
+         模板不做 IsMouseOver 缩放——放了会让相邻按钮的位置跟着抖。
+
+         2026-10-14 **次按钮从"幽灵按钮"改成"纸底按钮"** —— 稿子 design/dialog-buttons-proposals.html
+         的 **D 方案**（用户在 5 版里挑的）：底 `Paper2`、**不加描边**、字 `Ink2`，悬停再深一档到 `Rule`。
+         原来是透明底、只有悬停才给纸色，平时看着就是一行字（用户原话："取消不像按钮"）。
+         不加描边是为了和输入框那支"Paper2 + Rule"错开 —— 同一个对话框里别同时出现两圈线。 -->
     <Style x:Key="DialogButtonPrimary" TargetType="Button">
       <Setter Property="Background" Value="{DynamicResource Accent}"/>
       <Setter Property="Foreground" Value="{DynamicResource AccentOn}"/>
@@ -241,7 +246,7 @@
     </Style>
 
     <Style x:Key="DialogButtonGhost" TargetType="Button">
-      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Background" Value="{DynamicResource Paper2}"/>
       <Setter Property="Foreground" Value="{DynamicResource Ink2}"/>
       <Setter Property="FontSize" Value="12"/>
       <Setter Property="Padding" Value="16,6,16,6"/>
@@ -250,13 +255,15 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="bg" Background="Transparent" CornerRadius="8"
+            <!-- 底必须 TemplateBinding 到 Background：原来这里写死 Transparent，
+                 样式里设的底根本传不进来（改完"没反应"就是这一行）。 -->
+            <Border x:Name="bg" Background="{TemplateBinding Background}" CornerRadius="8"
                     Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="bg" Property="Background" Value="{DynamicResource Paper2}"/>
+                <Setter TargetName="bg" Property="Background" Value="{DynamicResource Rule}"/>
                 <Setter Property="Foreground" Value="{DynamicResource Ink}"/>
               </Trigger>
             </ControlTemplate.Triggers>

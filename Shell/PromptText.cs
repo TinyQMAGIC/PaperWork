@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using Paperwork.Data;   // Str：对话框按钮也是界面文案，走 tools\ui-strings.tsv
 
 namespace Paperwork.Shell;
 
@@ -71,14 +72,14 @@ internal static class PromptText
 
         var ok = new Button
         {
-            Content = "确定",
+            Content = Str.DlgOk,
             IsDefault = true,
             MinWidth = 78,
             Style = StyleOf("DialogButtonPrimary")
         };
         var cancel = new Button
         {
-            Content = "取消",
+            Content = Str.DlgCancel,
             IsCancel = true,
             MinWidth = 78,
             Style = StyleOf("DialogButtonGhost")
@@ -90,6 +91,12 @@ internal static class PromptText
             HorizontalAlignment = HorizontalAlignment.Right,
             Margin = new Thickness(0, 14, 0, 0)
         };
+        // 两枚按钮之间留 10px（2026-10-14）：原来**贴在一起**，取消加了纸底之后
+        // "确定 + 取消"会连成一整条，看着像一个长按钮。10 与手册 §3.3 的间距梯度同档
+        // （磁贴列距 6 / 行距 8 / 选项行 7 10）。
+        // 写在**按钮**上而不是 StackPanel.Spacing —— 后者不是 WPF 的 StackPanel 属性（那套是 WinUI）。
+        cancel.Margin = new Thickness(10, 0, 0, 0);
+
         buttons.Children.Add(ok);
         buttons.Children.Add(cancel);
 

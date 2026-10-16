@@ -5,6 +5,8 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <RootNamespace>Paperwork</RootNamespace>
     <AssemblyName>Paperwork</AssemblyName>
+    <!-- 显示出来的版本号（设置页状态行那一栏）读的就是这一项 —— 唯一来源，别在别处再写一份。
+         2026-10-17：0.0.42 → 0.1.0（第一个对外可用的版本）。 -->
     <Version>0.1.0</Version>
 
     <!-- 只出一版：默认构建配置就是 Release。

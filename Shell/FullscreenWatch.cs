@@ -118,7 +118,14 @@ internal sealed class FullscreenWatch : IDisposable
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 
-    [DllImport("user32.dll")]
+    /// <summary>
+    /// <b>CharSet 不能省。</b>省略时默认是 Ansi，入口点解析到 <c>GetClassNameA</c>，
+    /// 而缓冲区是 <c>char[]</c>（UTF-16）—— 实测返回的<b>长度是对的、内容全是 0</b>：
+    /// 对桌面窗口调一次，Unicode 版给回 <c>#32769</c>，这个声明给回 6 个 NUL。
+    /// 后果是 <see cref="IsShellWindow"/> 恒为 false，<see cref="NotAnApp"/> 那四个排除项
+    /// 一个都不生效；而 Progman 的矩形铺满整块监视器，于是「点桌面 / Win+D」被判成进了全屏。
+    /// </summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassName(IntPtr hwnd, char[] className, int maxCount);
 
     [DllImport("user32.dll")]

@@ -42,12 +42,26 @@ public partial class PanelWindow : Window
     }
 
     /// <summary>
-    /// 真图标（Shell / 自定义）贴片的边长 —— <b>图标格 × 80%</b>（B 方案，2026-09-30）。
+    /// 真图标（Shell / 自定义）贴片的边长 —— <b>图标格 × 80%</b>（26 / 34 / 45）。
     ///
-    /// 为什么不再满铺：满铺会把纸卡（Paper2 底 + Rule 描边）整个盖住，图标的方角还骑在
-    /// R11 圆角外面；而且 <c>box</c> 有 1px 描边、内容区只有 IconSize−2，写死 IconSize×IconSize
-    /// 的 Image <b>底边必然被裁 2px</b>。缩到 80% 之后纸卡重新成为底下那层"画框"，
-    /// 真图标磁贴和线稿磁贴回到同一种画法。
+    /// 2026-10-14 这一轮改了两件事，各自的原因：
+    /// <list type="bullet">
+    ///   <item><b>删掉贴片描边</b>：贴片 1px <c>Rule</c> + <c>box</c> 1px <c>Rule</c> 是两条同心
+    ///         圆角线，方形满铺图标时它们贴在一起看不出来，图标<b>一带透明</b>（盾形 / 圆形 /
+    ///         圆角方）内圈就从图标边缘退出来，变成"圈套圈"（用户截图）。删掉之后真图标磁贴
+    ///         与线稿磁贴是同一种画法：**一个框 + 居中图形**，圈数一致。</item>
+    ///   <item><b>留白仍是 80%</b>：同日先试了 <c>IconSize − 5</c>（四边各 1.5px），实测<b>太窄</b>——
+    ///         贴片几乎顶在框线上，"纸卡是底下那层画框"这层关系没了，用户要求改回原来的间距。
+    ///         所以尺寸回到 80%，只保留"去描边"这一条。</item>
+    /// </list>
+    ///
+    /// 注意 80% 的留白三档<b>不相等</b>：box 有 1px 描边，内容区是 IconSize−2（30 / 40 / 54），
+    /// 于是每边 2 / 3 / 4.5px —— 这是"用比例"的老代价（UI 手册 §3.5 那条"三档大小不统一"）。
+    /// 按当前口径先留着；哪天要<b>定值</b>留白，就改成 <c>IconSize − 8</c>（三档都是 3px）。
+    ///
+    /// 更早的<b>满铺</b>为什么不行：纸卡（Paper2 底 + Rule 描边）被整个盖住、图标的方角骑在
+    /// R11 圆角外，而且写死 IconSize×IconSize 的图在只有 IconSize−2 的内容区里
+    /// <b>底边必然被裁 2px</b>。
     ///
     /// 由 <see cref="IconSize"/> 派生，**不要直接设**（XAML 绑定里做不了算术）。
     /// </summary>
@@ -90,7 +104,28 @@ public partial class PanelWindow : Window
     private FolderWatcher? _watcher;
     private PanScroll? _pan;
     private FullscreenWatch? _fullscreen;
-    private bool _suppressSave;
+
+    /// <summary>
+    /// 「这一次窗口移动是代码干的，不是用户拖的」。<see cref="RequestSave"/> 看到它就跳过。
+    ///
+    /// <b>清除必须延到下一轮消息泵空了</b>，不能在 <c>SetWindowPos</c> 返回后就置回 false：
+    /// RequestSave 挂在 <c>LocationChanged</c> 上，而那个事件由 WM_WINDOWPOSCHANGED 送来，
+    /// 可能同步（SetWindowPos 内部直接派发）也可能排到消息队列里（Normal 优先级）——
+    /// 两种时序都要挡住，所以 <see cref="MoveWindow"/> 把清除投递到 ContextIdle
+    /// （优先级低于 Normal），保证排在所有待处理的窗口消息之后。
+    ///
+    /// <b>它挡的是什么、不是什么，要说准</b>（2026-10-12 实测校正过一次，原来的注释写过头了）：
+    ///   · 挡住：呼出时 <c>PositionAtCursor</c> 那一下、启动时 <c>SetBounds</c> 那一下、
+    ///     预热时屏外往返那两下 —— 每次都会多触发一轮 400ms 去抖存盘，纯属白写。
+    ///     实测「呼出+收起」三轮里 state.json 零重写，window.json 也不该因为这些多写。
+    ///   · <b>挡不住、也不归它管</b>：<c>OnBeforeHide</c> 里那句 <see cref="FlushSave"/> 是
+    ///     无条件的，所以每次收面板都会把当前位置落盘 —— FollowCursor 模式下存进去的就是
+    ///     「上次光标在哪」。那是既有行为，跟这个标志无关；要改得单独决定"跟随光标的位移
+    ///     该不该算用户摆的位置"。
+    ///   · 顺带说明为什么屏外预热不会把 -32000 存进去：<see cref="FlushSave"/> 每次都现读
+    ///     <c>GetWindowRect</c>，不是用捕获下来的旧值，所以延后的写入拿到的永远是当下位置。
+    /// </summary>
+    private bool _programmaticMove;
     private Board _board = BoardBuilder.Build(new StateStore(), NavFrame.Root);
 
     /// <summary>
@@ -126,6 +161,35 @@ public partial class PanelWindow : Window
     {
         _store.State.Settings.Hotkey = display;
         _store.Save();
+    }
+
+    /// <summary>
+    /// 注册表 Run 键写不进去时把开关退回关。
+    /// 不退回的话设置页会一直显示一个假的「开」、state.json 里也存着 true，
+    /// 而下次开机并不会自启 —— 三处口径互相矛盾，且每次启动都要再弹一遍同一个气泡。
+    /// </summary>
+    internal void ClearAutorunPreference()
+    {
+        _store.State.Settings.Autorun = false;
+        _store.Save();
+    }
+
+    /// <summary>
+    /// 退出 / 注销前的最后一道落盘。<b>幂等</b> —— App 在 <c>ExitApp</c>、<c>OnExit</c>、
+    /// <c>OnSessionEnding</c> 三处都会调，多调一次只是把同样的内容重写一遍。
+    ///
+    /// 为什么不能指望 <see cref="OnBeforeHide"/>：那套 flush 只挂在 <c>HidePanel()</c> 里，
+    /// 而退出时 <see cref="OnClosing"/> 一看到 <c>App.IsExiting</c> 就放行、窗口直接关，
+    /// HidePanel 压根不执行 —— 于是「面板开着时从托盘点退出」（唯一的退出入口）会丢掉
+    /// 备忘去抖窗口里最后那几个字（400ms）和刚挪过的窗口位置。
+    /// </summary>
+    internal void FlushOnExit()
+    {
+        if (Handle == IntPtr.Zero) return;   // 探针模式 / 窗口没建起来，没什么可落盘的
+
+        FlushNoteSave();
+        _store.SaveNav(_nav.Frames);
+        FlushSave();
     }
     public event EventHandler? TaskbarRestarted;
 
@@ -174,6 +238,7 @@ public partial class PanelWindow : Window
 
         InitSettings();
         InitMemo();
+        InitIconPicker();
 
         MouseLeftButtonUp += OnMouseUp;
         PreviewMouseRightButtonDown += OnRightDown;
@@ -183,6 +248,20 @@ public partial class PanelWindow : Window
         PreviewMouseLeftButtonUp += ReorderUp;
         MouseDoubleClick += OnDoubleClick;
         PreviewKeyDown += OnKeyDown;
+
+        // 拖拽的两道运行时兜底：捕获被抢走（UAC 安全桌面 / Win+L / Ctrl+Alt+Del 之后，
+        // 松手那一下永远收不到）与面板失去激活。语义与 Esc 一致 = 取消并还原，见 AbortDrag。
+        // 第三道在 OnBeforeHide → DropDragState。
+        Tiles.LostMouseCapture += OnDragCaptureLost;
+        Deactivated += OnPanelDeactivated;
+
+        // 用户挪动 / 拉伸窗口 → 去抖落盘几何。
+        // 原来这一整套 _saveTimer 全库只有 OnDpiChanged 一个触发点（没有任何
+        // LocationChanged / SizeChanged 订阅），所以位置只在"收面板"那一刻才存；
+        // 进程被杀 / 崩溃 / 断电就回退到上次收起时的样子。
+        LocationChanged += (_, _) => RequestSave();
+        SizeChanged += (_, _) => RequestSave();
+
         AllowDrop = true;
         Drop += OnDrop;
         DragOver += OnDragOver;
@@ -209,9 +288,12 @@ public partial class PanelWindow : Window
     private void OnWatchedFolderChanged()
     {
         if (_nav.Current.Kind != NavKind.Folder) return;
+        // 磁盘内容变了，这一层的缓存结论（显示名 / 失效 / 图标）全部作废：
+        // 不这么做的话"外面改了名、面板还显示旧名"会一直持续到缓存被 LRU 挤掉为止。
+        _icons?.InvalidateUnder(_watcher?.WatchedPath ?? string.Empty);
         Render(animate: false);
         ScheduleIcons();
-        Status("文件夹已更新");
+        Status(Str.StatusFolderUpdated);
     }
 
     // ------------------------------------------------------------ 生命周期
@@ -451,7 +533,7 @@ public partial class PanelWindow : Window
         // 上次落盘失败过，就在眼前这条最显眼的位置补一句。必须放在 Render 之后——
         // 状态栏会被 Render 里的 ApplyQuery 覆盖掉。
         if (_store.LastSaveFailure is { } fail)
-            Status($"上次保存失败：{fail}（面板上的改动还没写进磁盘）");
+            Status(string.Format(Str.StatusSaveFailed, fail));
 
         // 这里原来每次呼出都要写一行 startup.log（含进程资源快照）。M5 删掉了：
         // 它跑在 §13.3 那条 P95 < 30ms 的关键路径上，而"每次呼出延迟"这种量
@@ -516,16 +598,21 @@ public partial class PanelWindow : Window
     public void WarmUp()
     {
         if (IsPanelVisible || Handle == IntPtr.Zero) return;
+        // 返回值不查的话，失败时 saved 是 default(RECT)，窗口会被摆成 0×0
+        if (!Native.GetWindowRect(Handle, out var saved)) return;
+        if (saved.Width <= 0 || saved.Height <= 0) return;
 
-        Native.GetWindowRect(Handle, out var saved);
-        const uint flags = Native.SWP_NOZORDER | Native.SWP_NOACTIVATE;
-
-        _suppressSave = true;
-        Native.SetWindowPos(Handle, IntPtr.Zero, -32000, -32000, saved.Width, saved.Height, flags);
-        Show();
-        Hide();
-        Native.SetWindowPos(Handle, IntPtr.Zero, saved.Left, saved.Top, saved.Width, saved.Height, flags);
-        _suppressSave = false;
+        MoveWindow(-32000, -32000, saved.Width, saved.Height);
+        try
+        {
+            Show();
+            Hide();
+        }
+        finally
+        {
+            // Show/Hide 之间抛异常也不能把窗口留在屏外
+            MoveWindow(saved.Left, saved.Top, saved.Width, saved.Height);
+        }
     }
 
     private void OnFirstFrame(object? sender, EventArgs e)
@@ -584,7 +671,7 @@ public partial class PanelWindow : Window
                 // BuildFolder 内部只兜住了 UnauthorizedAccess / IO / ArgumentException，
                 // 剩下的（SecurityException 之类）在这里收掉。绝不能让异常从 Task.Run 漏出去：
                 // 那是线程池线程，不受 DispatcherUnhandledException 保护。
-                App.LogError($"读取文件夹失败 {requested.Path}：{ex.Message}");
+                App.LogError(string.Format(Str.LogFolderReadFailed, requested.Path, ex.Message));
                 return;
             }
 
@@ -695,8 +782,8 @@ public partial class PanelWindow : Window
 
             // 搜索的"没找到"不在这里说：搜索结果有自己的空态（SearchEmpty），
             // 磁贴区的空态只负责"这一层本来就是空的"。
-            EmptyTitle.Text = loading ? BoardBuilder.FolderLoadingText : "把任意文件拖进来";
-            EmptySub.Text = loading ? "稍等一下" : "程序、快捷方式、文件夹、文档、图片、压缩包…";
+            EmptyTitle.Text = loading ? BoardBuilder.FolderLoadingText : Str.BoardEmptyTitle;
+            EmptySub.Text = loading ? Str.BoardFolderLoadingHint : Str.BoardEmptySubtitle;
         }
 
         StatusText.Text = _board.Subtitle;
@@ -718,10 +805,21 @@ public partial class PanelWindow : Window
         }
 
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-        var anim = new DoubleAnimation(0.94, 1.0, ViewAnim) { EasingFunction = ease };
+        // FillBehavior.Stop：播完就把属性交还给基值（1.0，与动画终值相同，观感无跳变）。
+        // 默认的 HoldEnd 会让完成的时钟**永久持有**这两个属性 —— 之后任何对 Scroller.Opacity
+        // 的直接赋值都会被动画静默压掉，而且每次换层都多挂一个不释放的时钟。
+        var anim = new DoubleAnimation(0.94, 1.0, ViewAnim)
+        {
+            EasingFunction = ease,
+            FillBehavior = FillBehavior.Stop
+        };
         scale.BeginAnimation(ScaleTransform.ScaleXProperty, anim);
         scale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
-        Scroller.BeginAnimation(OpacityProperty, new DoubleAnimation(0.35, 1.0, ViewAnim) { EasingFunction = ease });
+        Scroller.BeginAnimation(OpacityProperty, new DoubleAnimation(0.35, 1.0, ViewAnim)
+        {
+            EasingFunction = ease,
+            FillBehavior = FillBehavior.Stop
+        });
     }
 
     /// <summary>
@@ -802,12 +900,26 @@ public partial class PanelWindow : Window
         var tile = TileFrom(e.OriginalSource);
         if (tile is null)
         {
-            // D10 点空白返回。但同一块区域也承担 D9 的拖动滚动，
-            // 拖动过就不能再当成点击，否则滑一下列表顺手就把这一层关掉了。
-            if (!e.Handled && _nav.Frames.Count > 1 && _pan?.ConsumedDrag != true && IsBlankArea(e.OriginalSource))
+            // "点空白"这一块区域同时承担两件事，靠**在哪一层**分开：
+            //   · 子层 → D10 点空白返回上一级（原样保留，一个字没改）
+            //   · 主页 → **取消选中**（2026-10-17 加：点磁贴亮起、点空白处灭掉，比"点了没反应"直觉）
+            //
+            // 两条共用同一个守卫：D9 的拖动滚动也按在这一块上，**滑过的那一下不算点击** ——
+            // 否则滑一下列表就把这一层关掉、或者把选中清掉了（ConsumedDrag 由 PanScroll 给）。
+            if (!e.Handled && IsBlankArea(e.OriginalSource) && _pan?.ConsumedDrag != true)
             {
-                _nav.Pop();
-                Render(animate: true);
+                if (_nav.IsRoot)
+                {
+                    // 改标记就够了：TileVm.Selected 带 INotifyPropertyChanged，模板里的
+                    // DataTrigger 自己会刷（选中 = 卡片垫一层 AccentSoft）。
+                    // **不要 Render** —— 重设 ItemsSource 会让磁贴闪一下（见下面选中态那段注释）。
+                    foreach (var t in _board.Tiles) t.Selected = false;
+                }
+                else
+                {
+                    _nav.Pop();
+                    Render(animate: true);
+                }
             }
             return;
         }
@@ -834,6 +946,14 @@ public partial class PanelWindow : Window
         e.Handled = true;
     }
 
+    /// <summary>
+    /// 判定"点在了空白处"。<b>现在只认 <c>Border</c> / <c>Grid</c> / <c>ScrollViewer</c></b>。
+    ///
+    /// 2026-10-17 起主页点空白会取消选中，所以这个函数决定了"哪里算空白"：
+    /// 状态栏那行字、空态提示那几块目前<b>不算</b>（它们是 <c>TextBlock</c> / <c>StackPanel</c>），
+    /// 点它们不会取消选中。先按现在这一版试；要扩的话记住代价 —— 范围一大，
+    /// 将来摆在同一块区域上的控件点击会被这里先吃掉。
+    /// </summary>
     private static bool IsBlankArea(object source) =>
         source is DependencyObject d && (d is System.Windows.Controls.Border || d is Grid || d is ScrollViewer);
 
@@ -886,7 +1006,7 @@ public partial class PanelWindow : Window
             case TileKind.Folder:
                 if (!StateStore.SafeIsDirectory(tile.Path))
                 {
-                    Status("该文件夹当前不可访问");
+                    Status(Str.StatusFolderUnreachable);
                     break;
                 }
 
@@ -901,7 +1021,12 @@ public partial class PanelWindow : Window
                     break;
                 }
 
-                if (_nav.Push(new NavFrame(NavKind.Folder, 0, tile.Path, System.IO.Path.GetFileName(tile.Path))))
+                // 标题一律走 BoardBuilder.DeriveName，与磁贴标签、搜索结果那条同一个口径
+                // （三处各自推名字就是这个项目反复踩的"改一处漏一处"）。
+                // 不能用 Path.GetFileName：它对盘符根返回空串（GetFileName(@"C:\") == ""），
+                // 于是把 C:\ 拖进来再点进去，面包屑和标题是一片空白。
+                if (_nav.Push(new NavFrame(NavKind.Folder, 0, tile.Path,
+                                           BoardBuilder.DeriveName(tile.Path, isDir: true))))
                 {
                     InvalidateDragForLayer();   // 换层 = 拖拽上下文作废（见那个方法的注释）
                     Render(animate: true);
@@ -914,7 +1039,7 @@ public partial class PanelWindow : Window
                 break;
 
             default:
-                if (tile.IsDead) Status("路径已失效，可在右键菜单里移除");
+                if (tile.IsDead) Status(Str.StatusDeadPath);
                 else if (!ShellOps.Open(tile.Path, elevated: false, out string err)) Status(err);
                 break;
         }
@@ -933,6 +1058,7 @@ public partial class PanelWindow : Window
         if (SettingsPanel.Visibility == Visibility.Visible
             || MemoPanel.Visibility == Visibility.Visible
             || MemoEditPanel.Visibility == Visibility.Visible
+            || IconPickerVisible
             || SearchPanel.Visibility == Visibility.Visible) return;
 
         // 拖拽中途按 Esc 只该取消拖拽，不能顺手把面板也收起来
@@ -972,14 +1098,28 @@ public partial class PanelWindow : Window
 
     /// <summary>文件夹层拒绝拖放时的提示（D26）。语义见 <see cref="OnDragOver"/>。</summary>
     private const string DropHintFolderLayer =
-        "文件夹层显示的是磁盘内容，请回主界面或组合里再拖";
+        Str.StatusFolderLayerNoDrop;
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
         // 文件夹层不接受拖放（D26）：那一层显示的是**磁盘内容**，不是面板数据。
         // 接下来"我拖进了这个文件夹"和"我加了个快捷方式"是两件事，宁可明确拒绝也不偷偷落到主界面。
-        bool folderLayer = _board.Kind == NavKind.Folder;
-        var effects = !folderLayer && e.Data.GetDataPresent(DataFormats.FileDrop)
+        // 覆盖层同理：设置页 / 备忘 / 搜索开着时，Drop 是冒泡事件、会一路冒到 Window 上被
+        // AddPaths 收进**用户看不见的那一层** —— 表面"什么都没发生"，磁贴却悄悄多了一块。
+        bool refused = _board.Kind == NavKind.Folder || OverlayVisible;
+
+        // GetDataPresent 是 OLE 调用：源进程已退出、格式查询失败都会抛 COMException，
+        // 而拖放循环里抛异常会让这一次既收不到 Drop 也收不到干净的 DragLeave，
+        // _dragDepth / _dropGhost 就此泄漏（虚线占位格再也清不掉）。
+        bool fileDrop = false;
+        try { fileDrop = e.Data.GetDataPresent(DataFormats.FileDrop); }
+        catch (Exception ex)
+        {
+            App.LogError(string.Format(Str.StatusDropQueryFailed, ex.Message));
+        }
+
+        // 与源允许的效果求交：只允许 Move / Link 的源不该被我们硬说成 Copy
+        var effects = !refused && fileDrop && (e.AllowedEffects & DragDropEffects.Copy) != 0
             ? DragDropEffects.Copy
             : DragDropEffects.None;
         e.Effects = effects;
@@ -988,6 +1128,14 @@ public partial class PanelWindow : Window
         SetDropGhost(effects == DragDropEffects.Copy && (_dropGhost is not null || _shown.Count > 0));
         e.Handled = true;
     }
+
+    /// <summary>设置 / 备忘列表 / 备忘编辑 / 选图标页 / 搜索，任一覆盖层开着。</summary>
+    private bool OverlayVisible =>
+        SettingsPanel.Visibility == Visibility.Visible
+        || MemoPanel.Visibility == Visibility.Visible
+        || MemoEditPanel.Visibility == Visibility.Visible
+        || IconPickerVisible
+        || SearchPanel.Visibility == Visibility.Visible;
 
     private int _dragDepth;
     private TileVm? _dropGhost;
@@ -1028,23 +1176,36 @@ public partial class PanelWindow : Window
             e.Handled = true;
             return;
         }
-
-        if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0)
+        if (OverlayVisible)
         {
-            Status("没收到文件路径");
+            Status(Str.StatusDropIgnoredWhileOverlay);
+            e.Handled = true;
             return;
         }
 
-        // 两层封顶：已经在组合里，就不接受"拖一个组合进来"
-        if (!_board.CanCreateGroup)
+        string[]? paths = null;
+        try { paths = e.Data.GetData(DataFormats.FileDrop) as string[]; }
+        catch (Exception ex)
         {
-            Status("组合内不能再放组合，已按普通条目加入");
+            App.LogError(string.Format(Str.StatusDropReadFailed, ex.Message));
         }
+        if (paths is null || paths.Length == 0)
+        {
+            Status(Str.StatusDroppedNoPath);
+            e.Handled = true;
+            return;
+        }
+
+        // 这里原来有一道「组合内不能再放组合，已按普通条目加入」的提示，判据是
+        // !_board.CanCreateGroup（= 当前在组合里）。但拖放进来的永远是**文件路径**，
+        // 不可能是面板自造的"组合"概念 —— 那条提示描述的是一种根本到不了的情形，
+        // 实际效果是：在组合里拖任何文件进去都会被莫名其妙地告知"不能放组合"。
+        // 两层封顶（D17）在这条路上无从违反，直接删。
 
         int added = _store.AddPaths(paths, _board.GroupId);
         Render(animate: false);
         ScheduleIcons();
-        Status(added == 0 ? "这些条目已经在这一层了" : $"已加入 {added} 项");
+        Status(added == 0 ? Str.StatusAlreadyThere : string.Format(Str.StatusAdded, added));
     }
 
     // ------------------------------------------------------------ 右键菜单
@@ -1089,13 +1250,13 @@ public partial class PanelWindow : Window
         var menu = new ContextMenu { Style = (Style)FindResource("PaperContextMenu") };
 
         if (tile.Kind is TileKind.Group or TileKind.Folder)
-            menu.Items.Add(MenuItem("打开", () => Activate(tile)));
+            menu.Items.Add(MenuItem(Str.MenuOpen, () => Activate(tile)));
         else if (tile.Kind == TileKind.More)
-            menu.Items.Add(MenuItem("在资源管理器中打开", () => ShellOps.OpenInExplorer(tile.Path, null)));
+            menu.Items.Add(MenuItem(Str.BoardOpenInExplorer, () => ShellOps.OpenInExplorer(tile.Path, null)));
         else
         {
-            menu.Items.Add(MenuItem("打开", () => Activate(tile)));
-            menu.Items.Add(MenuItem("以管理员身份运行", () =>
+            menu.Items.Add(MenuItem(Str.MenuOpen, () => Activate(tile)));
+            menu.Items.Add(MenuItem(Str.MenuRunAsAdmin, () =>
             {
                 if (!ShellOps.Open(tile.Path, elevated: true, out string err)) Status(err);
             }));
@@ -1106,8 +1267,8 @@ public partial class PanelWindow : Window
         if (tile.Kind != TileKind.Group && !string.IsNullOrWhiteSpace(tile.Path))
         {
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem("打开文件位置", () => ShellOps.OpenInExplorer(null, tile.Path)));
-            menu.Items.Add(MenuItem("资源管理器菜单", () => ShowNativeMenu(tile)));
+            menu.Items.Add(MenuItem(Str.MenuOpenFileLocation, () => ShellOps.OpenInExplorer(null, tile.Path)));
+            menu.Items.Add(MenuItem(Str.MenuExplorerMenu, () => ShowNativeMenu(tile)));
         }
 
         if (tile.EntryId is int eid)
@@ -1119,35 +1280,59 @@ public partial class PanelWindow : Window
             // 注意别拿"路径末尾那段"当本名：那是磁盘文件名，而这里比的是 Shell 显示名。
             // 系统开了"隐藏已知扩展名"时两者不同（面板显示 steam、路径末尾是 steam.exe），
             // 照路径敲会被当成自定义名钉住。
-            menu.Items.Add(MenuItem("重命名", () => RenameEntry(eid)));
-            menu.Items.Add(tile.CustomIcon is null
-                ? MenuItem("更改图标…", () => ChangeIcon(eid, null))
-                : MenuItem("恢复系统图标", () => ChangeIcon(eid, null, clear: true)));
+            menu.Items.Add(MenuItem(Str.MenuRename, () => RenameEntry(eid)));
+            // 预设图标：排在"重命名"下面、"改图标"上面。它开的是**面板内的选择页**，**不带省略号** ——
+            // 省略号在这组菜单里表示"会弹窗"（见下面那条「更改图标…」），点下去会发生什么一眼能看出来。
+            menu.Items.Add(MenuItem(Str.MenuTilePreset, () => OpenEntryIconPicker(eid)));
+            // 「恢复默认图标」**一次把预设与自定义两层都剥掉**，回到磁贴自己的图标
+            // （程序 / 快捷方式 = 真 Shell 图标，文件 = 类型线稿，文件夹 = 文件夹线稿）。
+            // 不管当前停在第 2 层还是第 3 层都回到第 1 层 —— 一套逻辑、一个菜单项，
+            // 不再另设「恢复系统图标」（2026-10-14 定）。所以它只在**确实改过**时出现。
+            if (tile.PresetIcon is not null || tile.CustomIcon is not null)
+                menu.Items.Add(MenuItem(Str.MenuRestoreDefault, () =>
+                {
+                    _store.RestoreEntryDefaultIcon(eid);
+                    Render(animate: false);
+                    ScheduleIcons();       // 剥掉预设后程序类要重新去解真图标
+                    Status(Str.StatusDefaultRestored);
+                }));
+            menu.Items.Add(MenuItem(Str.MenuChangeIcon, () => ChangeIcon(eid)));
 
             if (_board.CanCreateGroup)
             {
                 menu.Items.Add(Sep());
-                menu.Items.Add(MenuItem("新建组合…", () => CreateGroupFrom(eid)));
+                menu.Items.Add(MenuItem(Str.MenuNewGroup, () => CreateGroupFrom(eid)));
             }
             else if (_board.GroupId is int cur)
             {
-                menu.Items.Add(MenuItem("移出本组合", () => { _store.MoveEntry(eid, null); Render(false); }));
+                menu.Items.Add(MenuItem(Str.MenuLeaveGroup, () => { _store.MoveEntry(eid, null); Render(false); }));
             }
 
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem("从面板移除", () =>
+            menu.Items.Add(MenuItem(Str.MenuRemoveFromPanel, () =>
             {
                 _store.RemoveEntry(eid);
                 Render(animate: false);
-                Status("已从面板移除（未删除磁盘文件）");
+                Status(Str.StatusRemovedFromPanel);
             }, danger: true));
         }
         else if (tile.GroupId is int gid)
         {
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem("重命名", () => RenameGroup(gid)));
+            menu.Items.Add(MenuItem(Str.MenuRename, () => RenameGroup(gid)));
+            // 文案刻意与下面几类区分：**组合**这条叫"更改组合预设图标"，条目那条叫"更改磁贴预设图标"；
+            // 而文件磁贴那条「更改图标…」会弹**文件对话框**（挑一个 .ico / .exe），所以带省略号 ——
+            // 这三条打开的都是"选一张图"，但一个开面板、一个弹窗，一眼要能看出点下去会发生什么。
+            menu.Items.Add(MenuItem(Str.MenuGroupPreset, () => OpenGroupIconPicker(gid)));
+            if (_store.Group(gid)?.Icon is not null)
+                menu.Items.Add(MenuItem(Str.MenuRestoreDefault, () =>
+                {
+                    _store.SetGroupIcon(gid, null);
+                    Render(animate: false);
+                    Status(Str.StatusDefaultRestored);
+                }));
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem("删除组合（条目退回主界面）", () =>
+            menu.Items.Add(MenuItem(Str.MenuDeleteGroup, () =>
             {
                 _store.RemoveGroup(gid);
                 if (_nav.Current.Kind == NavKind.Group && _nav.Current.Id == gid) _nav.PopTo(0);
@@ -1219,12 +1404,12 @@ public partial class PanelWindow : Window
     {
         var menu = new ContextMenu { Style = (Style)FindResource("PaperContextMenu") };
 
-        var toggle = MenuItem(IsPanelVisible ? "收起面板" : "呼出面板", () => Toggle());
+        var toggle = MenuItem(IsPanelVisible ? Str.TrayHide : Str.TrayShow, () => Toggle());
         MenuLook.SetIcon(toggle, MenuIcons.Panel);
         MenuLook.SetHint(toggle, RegisteredHotkey?.Current?.Display);
         menu.Items.Add(toggle);
 
-        var settings = MenuItem("设置", () =>
+        var settings = MenuItem(Str.TraySettings, () =>
         {
             // 面板收起时，设置页是"看不见的"——它是面板里的覆盖层。
             // 只发一句"打开设置页"，用户看到的就是点了没反应；必须先弹面板再开设置页。
@@ -1239,7 +1424,7 @@ public partial class PanelWindow : Window
         menu.Items.Add(Sep());
 
         // 退出用危险色：它会连托盘一起结束，是这个菜单里最重的动作
-        var exit = MenuItem("退出", () => ExitRequested?.Invoke(this, EventArgs.Empty), danger: true);
+        var exit = MenuItem(Str.TrayExit, () => ExitRequested?.Invoke(this, EventArgs.Empty), danger: true);
         MenuLook.SetIcon(exit, MenuIcons.Power);
         menu.Items.Add(exit);
 
@@ -1265,7 +1450,7 @@ public partial class PanelWindow : Window
         {
             bool ok = NativeContextMenu.TryShow(Handle, path, x, y);
             if (!ok && !string.IsNullOrEmpty(NativeContextMenu.LastFailure))
-                Status("系统菜单不可用：" + NativeContextMenu.LastFailure);
+                Status(Str.StatusSysMenuUnavailable + NativeContextMenu.LastFailure);
         }), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
     }
 
@@ -1285,7 +1470,7 @@ public partial class PanelWindow : Window
 
         // 路径永远显示在标题下面：仅凭显示名分不清谁是谁（面板上三个同名文件是常事），
         // 而且刚才那条"和 initial 相同就不显示"的判断，恰好让新条目第一次打开时连路径都没有。
-        string? typed = PromptText.Show(this, "重命名", initial, entry.Path);
+        string? typed = PromptText.Show(this, Str.MenuRename, initial, entry.Path);
         if (typed is null) return;
 
         // 敲的就是"没有自定义时本来会显示的那个名字"时，等于没有"自定义"这回事：
@@ -1311,33 +1496,29 @@ public partial class PanelWindow : Window
         if (group is null) return;
 
         // 不给第二行提示：组合名在磁盘上没有对应物，说"不改动任何文件"反而像在道歉
-        string? typed = PromptText.Show(this, "重命名", group.Title);
+        string? typed = PromptText.Show(this, Str.MenuRename, group.Title);
         if (typed is null) return;
 
         _store.RenameGroup(id, typed);
 
         // 正在这一层时标题和面包屑都取自组合名，得一起换掉
         Render(animate: false);
-        Status($"已重命名为「{typed}」");
+        Status(string.Format(Str.StatusRenamed, typed));
     }
 
     private TileVm? TileOf(int id) => _board.Tiles.FirstOrDefault(t => t.EntryId == id);
 
-    private void ChangeIcon(int id, string? unused, bool clear = false)
+    /// <summary>
+    /// 「更改图标…」：挑一个图标文件（.ico / .exe / .dll）。<c>StateStore.SetEntryIcon</c> 会
+    /// **顺手把预设那一层剥掉**（两层并存时预设在上面，否则"挑了文件却看不到变化"）。
+    /// 想回到磁贴自己的图标请走菜单里的「恢复默认图标」—— 它一次剥两层，这里不再留一条"清除"。
+    /// </summary>
+    private void ChangeIcon(int id)
     {
-        if (clear)
-        {
-            _store.SetEntryIcon(id, null);
-            Render(animate: false);
-            ScheduleIcons();
-            Status("已恢复系统图标");
-            return;
-        }
-
         var dlg = new Microsoft.Win32.OpenFileDialog
         {
-            Title = "选择图标文件",
-            Filter = "图标文件 (*.ico;*.exe;*.dll)|*.ico;*.exe;*.dll|所有文件 (*.*)|*.*",
+            Title = Str.DlgChooseIconFile,
+            Filter = Str.DlgIconFileFilter,
             CheckFileExists = true
         };
 
@@ -1346,7 +1527,7 @@ public partial class PanelWindow : Window
         _store.SetEntryIcon(id, dlg.FileName);
         Render(animate: false);
         ScheduleIcons();
-        Status("已更换图标");
+        Status(Str.StatusIconChanged);
     }
 
     private void CreateGroupFrom(int seedEntryId)
@@ -1358,11 +1539,28 @@ public partial class PanelWindow : Window
 
         if (selected.Count == 0) return;
 
-        // M1 先自动编号命名；内联改名（F2）跟右键菜单一起在 M2 做
-        string title = $"新组合 {_store.State.Groups.Count + 1}";
-        var group = _store.CreateGroup(title, selected);
-        Status(group is null ? "创建失败" : $"已创建「{group.Title}」，含 {selected.Count} 项");
+        var group = _store.CreateGroup(NextNewGroupName(), selected);
+        Status(group is null ? Str.StatusGroupCreateFailed
+                             : string.Format(Str.StatusGroupCreated, group.Title, selected.Count));
         Render(animate: false);
+    }
+
+    /// <summary>
+    /// 「新组合 N」要避重名：原来写 <c>Groups.Count + 1</c>，删过一个组合之后就会和现存的
+    /// 重号，界面上并排两个同名组合没法区分。与拖拽合并那条 <c>NextGroupName</c> 同一套思路。
+    /// </summary>
+    private string NextNewGroupName()
+    {
+        var taken = new HashSet<string>(
+            _store.State.Groups.Select(g => g.Title), StringComparer.CurrentCultureIgnoreCase);
+
+        const string baseName = Str.BoardNewGroupName;
+        if (!taken.Contains(baseName)) return baseName;
+        for (int i = 2; ; i++)
+        {
+            string candidate = $"{baseName} {i}";
+            if (!taken.Contains(candidate)) return candidate;
+        }
     }
 
     // ------------------------------------------------------------ 位置（§10）
@@ -1398,11 +1596,21 @@ public partial class PanelWindow : Window
 
     private int DipToPhys(double dip) => (int)Math.Round(dip * DpiScaleX);
 
+    /// <summary>
+    /// 由代码摆窗口（不是用户拖的）。摆完把 <see cref="_programmaticMove"/> 的清除
+    /// 投递到 ContextIdle —— 理由见那个字段的注释。
+    /// </summary>
+    private void MoveWindow(int x, int y, int w, int h)
+    {
+        _programmaticMove = true;
+        Native.SetWindowPos(Handle, IntPtr.Zero, x, y, w, h, Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+        _ = Dispatcher.BeginInvoke(new Action(() => _programmaticMove = false),
+                                   DispatcherPriority.ContextIdle);
+    }
+
     private void SetBounds(int x, int y, int w, int h)
     {
-        _suppressSave = true;
-        Native.SetWindowPos(Handle, IntPtr.Zero, x, y, w, h, Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
-        _suppressSave = false;
+        MoveWindow(x, y, w, h);
         FlushSave();
     }
 
@@ -1416,14 +1624,12 @@ public partial class PanelWindow : Window
         int x = Math.Clamp(cursor.X - w / 2, work.Left, Math.Max(work.Left, work.Right - w));
         int y = Math.Clamp(cursor.Y - h / 2, work.Top, Math.Max(work.Top, work.Bottom - h));
 
-        _suppressSave = true;
-        Native.SetWindowPos(Handle, IntPtr.Zero, x, y, w, h, Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
-        _suppressSave = false;
+        MoveWindow(x, y, w, h);
     }
 
     private void RequestSave()
     {
-        if (_suppressSave || Handle == IntPtr.Zero) return;
+        if (_programmaticMove || Handle == IntPtr.Zero) return;
         _saveTimer ??= CreateSaveTimer();
         _saveTimer.Stop();
         _saveTimer.Start();
@@ -1456,8 +1662,14 @@ public partial class PanelWindow : Window
 
         // 设置页（RowSpan=5）把主状态栏盖住了，而改键成败、开关切换这些提示
         // 大多发生在设置页里 —— 只写 StatusText 用户根本看不见。
-        // 路由一份到设置页自己的状态行；备忘两个覆盖层（MemoStatus / MemoEditStatus）是同一套。
-        if (SettingsPanel.Visibility == Visibility.Visible) SettingsStatus.Text = text;
+        // 按当前可见的那个覆盖层再投一份。
+        //
+        // 备忘**编辑页**刻意不投：MemoEditStatus 显示的是「N 字 · 时间」的实时读数，
+        // 一句状态提示把它冲掉比看不见提示更糟 —— 而且下一次敲键就会把读数刷回来，
+        // 观感是提示闪一下就没了。编辑页里的反馈由它自己那条读数负责。
+        if (SettingsPanel.Visibility == Visibility.Visible) SaySettings(text);
+        else if (IconPickerVisible) IconPickerStatus.Text = text;
+        else if (MemoPanel.Visibility == Visibility.Visible) MemoStatus.Text = text;
     }
 }
 
@@ -1478,14 +1690,16 @@ internal static class ShellOps
             // runas 拉起的是目标程序，本进程始终是普通权限（D14）
             if (elevated) psi.Verb = "runas";
 
-            Process.Start(psi);
+            // 返回的 Process 只用来"发起"，不需要等它、也不需要读它 —— 但不 Dispose 会
+            // 一直攥着一个进程句柄到 GC 收尾。每打开一个文件泄一个，一天几十次。
+            Process.Start(psi)?.Dispose();
             return true;
         }
         catch (Exception ex)
         {
             error = ex is System.ComponentModel.Win32Exception && ex.HResult == unchecked((int)0x800704C7)
-                ? "已取消管理员授权"
-                : $"无法打开：{ex.Message}";
+                ? Str.StatusCancelAdmin
+                : string.Format(Str.StatusOpenFailed, ex.Message);
             return false;
         }
     }
@@ -1505,7 +1719,7 @@ internal static class ShellOps
 
             var psi = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
             psi.ArgumentList.Add(arg);
-            Process.Start(psi);
+            Process.Start(psi)?.Dispose();   // 同 Open：只发起、不持有句柄
         }
         catch (Exception) { /* explorer 拒绝就什么也不做，别弹错误框 */ }
     }

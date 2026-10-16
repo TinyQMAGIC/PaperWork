@@ -80,6 +80,9 @@ public partial class PanelWindow
 
         MemoPin.Click += (_, _) =>
         {
+            // 草稿态（一个字都没敲、存储里还没有它）这里直接返回：没有 id 可以改。
+            // 勾选框自己的视觉此刻已经翻上去了，这个值由 PushEdit 建条目时读走
+            // （AddNote(pinned)），所以草稿态点置顶不再是「看着勾上了、存下去是 false」。
             if (_editingNoteId == 0) return;
             _store.SetNotePinned(_editingNoteId, MemoPin.IsChecked == true);
         };
@@ -144,7 +147,7 @@ public partial class PanelWindow
         MemoEmpty.Visibility = vms.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         // 与空态互斥：只有**有条目**时，列表末尾才给那行虚线新建入口
         MemoNewRow.Visibility = vms.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
-        MemoStatus.Text = $"{vms.Count} 条备忘 · 按最近更新";
+        MemoStatus.Text = string.Format(Str.MemoSummary, vms.Count);
     }
 
     private void OnNoteClick(object sender, MouseButtonEventArgs e)
@@ -162,15 +165,15 @@ public partial class PanelWindow
         if (n is null) return;
 
         var menu = new ContextMenu { Style = (Style)FindResource("PaperContextMenu") };
-        menu.Items.Add(MenuItem("编辑", () => OpenEditor(id)));
-        menu.Items.Add(MenuItem(n.Pinned ? "取消置顶" : "置顶", () =>
+        menu.Items.Add(MenuItem(Str.MemoEdit, () => OpenEditor(id)));
+        menu.Items.Add(MenuItem(n.Pinned ? Str.MemoUnpin : Str.MemoPin, () =>
         {
             _store.SetNotePinned(id, !n.Pinned);
             RenderMemoList();
         }));
         menu.Items.Add(Sep());
         // danger: 红字红图标。菜单里唯一的危险动作就是它，标出来免得误点
-        menu.Items.Add(MenuItem("删除", () =>
+        menu.Items.Add(MenuItem(Str.MemoDelete, () =>
         {
             _store.DeleteNote(id);
             RenderMemoList();
@@ -224,15 +227,22 @@ public partial class PanelWindow
         return false;
     }
 
-    /// <summary>命中元素是否落在某个容器里。</summary>
+    /// <summary>
+    /// 命中元素是否落在某个容器里。
+    ///
+    /// 往上走必须用 <see cref="ParentOf"/> 而不是 <c>VisualTreeHelper.GetParent</c>：
+    /// 原来这里写的是「不是 Visual 就 return false」，于是<b>点到行内文字就判定为"不在容器里"</b>——
+    /// 搜索结果行的高亮文案是 <c>Run</c>（FrameworkContentElement，不是 Visual），
+    /// 点标题 → 判定不在结果区 → 照样抢焦点 → ↑↓ / Enter / 继续打字全部失效。
+    /// 而文字恰恰是结果行上最容易点中的地方。见 <see cref="ParentOf"/> 的注释。
+    /// </summary>
     private static bool IsWithin(object source, DependencyObject container)
     {
         var node = source as DependencyObject;
         while (node is not null)
         {
             if (ReferenceEquals(node, container)) return true;
-            if (!IsVisual(node)) return false;
-            node = VisualTreeHelper.GetParent(node);
+            node = ParentOf(node);
         }
         return false;
     }
@@ -361,8 +371,10 @@ public partial class PanelWindow
             // 只写标题也算写了：那是用户明确留下的东西，照样建。
             if (IsEditorBlank()) return;
 
-            // 真正敲进第一个字，此刻才落盘（AddNote 内部 Touch）—— 低频，不必去抖
-            _editingNoteId = _store.AddNote().Id;
+            // 真正敲进第一个字，此刻才落盘（AddNote 内部 Touch）—— 低频，不必去抖。
+            // 置顶必须在这里一并带进去：草稿期间点勾选框时 _editingNoteId 还是 0，
+            // MemoPin.Click 那条路直接 return，建完再补一次 SetNotePinned 又要多写一遍盘。
+            _editingNoteId = _store.AddNote(MemoPin.IsChecked == true).Id;
         }
 
         _store.UpdateNote(_editingNoteId, MemoTitle.Text, MemoBody.Text);
@@ -379,7 +391,7 @@ public partial class PanelWindow
         var n = _store.Note(_editingNoteId);
         if (n is null) return;
 
-        MemoEditStatus.Text = $"{n.Body.Length} 字 · {NoteVm.FormatTime(n.UpdatedAt)}";
+        MemoEditStatus.Text = string.Format(Str.MemoLengthAndTime, n.Body.Length, NoteVm.FormatTime(n.UpdatedAt));
     }
 
     /// <summary>
@@ -424,7 +436,7 @@ internal sealed class NoteVm
     public static NoteVm From(NoteItem n) => new()
     {
         Id = n.Id,
-        Title = string.IsNullOrWhiteSpace(n.Title) ? "（无标题）" : n.Title,
+        Title = string.IsNullOrWhiteSpace(n.Title) ? Str.MemoUntitled : n.Title,
         // 预览折成一行：卡片只给两行高度，换行符会把版式顶乱
         Preview = n.Body.Replace('\r', ' ').Replace('\n', ' '),
         TimeText = FormatTime(n.UpdatedAt),
@@ -438,7 +450,7 @@ internal sealed class NoteVm
         var now = DateTimeOffset.Now;
 
         if (t.Date == now.Date) return t.ToString("HH:mm");
-        if (t.Date == now.Date.AddDays(-1)) return "昨天";
+        if (t.Date == now.Date.AddDays(-1)) return Str.MemoYesterday;
         return t.ToString("M/d");
     }
 }

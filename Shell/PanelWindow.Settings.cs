@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Paperwork.Data;
 using Paperwork.Hotkeys;
 using Paperwork.Themes;
@@ -21,6 +24,38 @@ public partial class PanelWindow
 {
     private readonly List<(Border Row, string Tag)> _optionRows = new();
     private bool _capturingHotkey;
+
+    /// <summary>
+    /// 临时提示占住设置页状态行的时长，到点自动回到常驻摘要（程序名 · 版本号）。
+    ///
+    /// 主面板那条是 2.5 秒，这里给到 8 秒：设置页的提示多半是「已改为 Ctrl+Alt+D」
+    /// 「取消开机自启失败…」这类需要读完并对照界面确认的信息，2.5 秒一闪就过去了。
+    /// 回到摘要只是把行让出来，不依赖用户操作，所以给长一点没有副作用。
+    /// </summary>
+    private const int SettingsStatusHoldSeconds = 8;
+
+    private DispatcherTimer? _settingsStatusTimer;
+
+    /// <summary>
+    /// 版本号，进程内取一次就够。唯一来源是 <c>Paperwork.csproj</c> 的 <c>&lt;Version&gt;</c>——
+    /// 硬编码一份字符串，发版时必然有一处忘记改。
+    /// </summary>
+    private static readonly string VersionText = ReadVersionText();
+
+    private static string ReadVersionText()
+    {
+        var asm = Assembly.GetEntryAssembly() ?? typeof(PanelWindow).Assembly;
+
+        // 用 InformationalVersion 而不是 GetName().Version：后者会补出第四位（0.0.32.0），
+        // 直接显示出来就是多一个多余的 .0。
+        string ver = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                     ?? asm.GetName().Version?.ToString(3)
+                     ?? "?";
+
+        // SDK 会把 InformationalVersion 写成 "0.0.32+<commit>"，只要加号之前那一段
+        int plus = ver.IndexOf('+', StringComparison.Ordinal);
+        return plus > 0 ? ver[..plus] : ver;
+    }
 
     /// <summary>改键要碰的那个已注册热键；由 App 在启动后塞进来。</summary>
     internal GlobalHotkey? RegisteredHotkey { get; set; }
@@ -76,11 +111,20 @@ public partial class PanelWindow
         // 禁用的元素不弹 ToolTip（"设置"那个气泡就是这么漏出来的），也不会响应误触。
         Keyboard.ClearFocus();
         FocusManager.SetFocusedElement(this, null);
+        // 三枚标题栏按钮一起禁：设置页是不透明覆盖层、RowSpan=5 盖住整条标题栏，
+        // 禁掉是为了不弹 ToolTip（焦点路径会漏气泡）也不响应误触。
+        // MemoButton 原来漏了 —— 它和另外两枚没有任何区别，漏它纯属手写列表少写一行。
         SettingsButton.IsEnabled = false;
         HideButton.IsEnabled = false;
+        MemoButton.IsEnabled = false;
 
         RefreshSettingVisuals();
         SettingsPanel.Visibility = Visibility.Visible;
+
+        // 状态行回到常驻摘要。上一次打开如果留了个还没到点的提示计时器，这里一并停掉，
+        // 否则它会在新一次打开后中途把摘要再写一遍（虽然无害，但计时语义就乱了）。
+        _settingsStatusTimer?.Stop();
+        ShowSettingsSummary();
 
         // 清完焦点必须再交出去，否则设置页一个可聚焦的东西都没有。
         //
@@ -100,9 +144,54 @@ public partial class PanelWindow
         SettingsPanel.Visibility = Visibility.Collapsed;
         SettingsButton.IsEnabled = true;
         HideButton.IsEnabled = true;
+        MemoButton.IsEnabled = true;
         EndHotkeyCaptureIfAny();
-        // 残留的提示（比如改键失败那句）下次打开还在 —— 状态行只在有话说的那几秒有效
+        // 残留的提示（比如改键失败那句）下次打开还在 —— 状态行只在有话说的那几秒有效。
+        // 计时器也要停：面板已经藏起来了，留着它到点去写一行看不见的字纯属浪费，
+        // 而且下一次打开时可能被它抢在 ShowSettingsSummary 之前写一次。
+        _settingsStatusTimer?.Stop();
         SettingsStatus.Text = string.Empty;
+    }
+
+    /// <summary>
+    /// 设置页状态行的常驻摘要：<c>Paperwork · 0.0.32</c>。
+    ///
+    /// 为什么是"摘要"而不是额外加一行：状态行右 86px 要留给右下角那两道页叠斜线，
+    /// 可用宽度只有 422px（MinWidth=320 时只剩 218px），再并排放一段提示会把最长的那句
+    /// （改键捕获提示）切得更狠。让常驻内容占这一行、临时提示整行替换，
+    /// 既守住了宽度，也让"常驻"和"临时"一眼可分 —— 与主面板「N 项 · M 个组合」
+    /// 那套「提示 2.5s 后回到摘要」是同一个模式，只是这里给到 8 秒。
+    ///
+    /// 版本号用等宽体（手册 §2：状态栏数字归等宽体），其余沿用状态行自己的 10.5 / Ink3。
+    /// 分隔符是 <c>·</c>，与 <c>Board.RootSubtitle</c> 的「N 项 · M 个组合」同一支笔。
+    /// </summary>
+    private void ShowSettingsSummary()
+    {
+        SettingsStatus.Inlines.Clear();
+        SettingsStatus.Inlines.Add(new Run("Paperwork · "));
+        SettingsStatus.Inlines.Add(new Run(VersionText)
+        {
+            FontFamily = (FontFamily)FindResource("MonoFont")
+        });
+    }
+
+    /// <summary>
+    /// 往设置页状态行投一句临时提示。<b>整行替换</b>常驻摘要，8 秒后由计时器拉回。
+    /// 连续提示时重新计时 —— 否则上一条的 8 秒会把刚写进去的这条提前顶掉。
+    /// </summary>
+    private void SaySettings(string text)
+    {
+        SettingsStatus.Text = text;   // 赋 .Text 会连摘要那两条 Inline 一起清掉
+        _settingsStatusTimer ??= CreateSettingsStatusTimer();
+        _settingsStatusTimer.Stop();
+        _settingsStatusTimer.Start();
+    }
+
+    private DispatcherTimer CreateSettingsStatusTimer()
+    {
+        var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(SettingsStatusHoldSeconds) };
+        t.Tick += (_, _) => { t.Stop(); ShowSettingsSummary(); };
+        return t;
     }
 
     private void OnOptionRowClick(object sender, MouseButtonEventArgs e)
@@ -181,7 +270,21 @@ public partial class PanelWindow
         var settings = _store.State.Settings;
         switch (value)
         {
-            case "autorun": settings.Autorun = !settings.Autorun; break;
+            case "autorun":
+                // 写完注册表才知道成不成，所以这一项不能留在 ApplyTheme 里「顺带」写：
+                // 失败必须当场把开关退回原位并说清原因。显示「开」而实际永不自启，
+                // 是这个功能最坏的一种坏法 —— 用户要到下次开机才发现，那时已经没有任何线索了。
+                settings.Autorun = !settings.Autorun;
+                // userInitiated: true —— 这是**用户明确拨的开关**，允许它改写指向别的副本的登记
+                // （启动时那条自动同步不许改，见 Autorun.Apply 的注释）。
+                if (Lifecycle.Autorun.Apply(settings.Autorun, userInitiated: true)) break;
+
+                settings.Autorun = !settings.Autorun;      // 退回原位，别留一个假的「开」
+                Status(settings.Autorun
+                    ? Str.SetAutorunOffFailed
+                    : Str.SetAutorunOnFailed);
+                break;
+
             case "trayonclose": settings.CloseToTray = !settings.CloseToTray; break;
             case "hideonfullscreen": settings.HideOnFullscreen = !settings.HideOnFullscreen; break;
 
@@ -194,12 +297,18 @@ public partial class PanelWindow
         }
     }
 
-    /// <summary>换主题色/纸张。只改应用级资源字典，磁贴用 DynamicResource 所以不用重建。</summary>
+    /// <summary>
+    /// 换主题色/纸张。只改应用级资源字典，磁贴用 DynamicResource 所以不用重建。
+    ///
+    /// 这里<b>不再顺带写注册表</b>（原来每点任何一项都会 Apply 一遍 Autorun）：
+    /// 换主题色、调图标档位跟开机自启毫无关系，却每次都去动一次 HKCU；
+    /// 更要紧的是那样写不进去也没人能知道 —— 返回值被丢在了一条通用路径上。
+    /// 现在 Run 键只有两处会写：启动时（App.OnStartup）与点「跟随系统启动」那一行。
+    /// </summary>
     private void ApplyTheme()
     {
         var s = _store.State.Settings;
         Palette.Apply(s.Accent, s.Paper);
-        Lifecycle.Autorun.Apply(s.Autorun);
         _store.Save();
     }
 
@@ -257,7 +366,7 @@ public partial class PanelWindow
         // 漏了它，红字会残留到下一次进设置页。
         // 注意只能设回 Ink2 —— XAML 里这行原本就是 {DynamicResource Ink2}；
         // 用 ClearValue 会掉成继承来的 Ink，比原来深一档，等于悄悄改了设计。
-        HotkeyText.Text = RegisteredHotkey?.Current?.Display ?? "未设置";
+        HotkeyText.Text = RegisteredHotkey?.Current?.Display ?? Str.SetHotkeyUnset;
         HotkeyText.SetResourceReference(TextBlock.ForegroundProperty, "Ink2");
     }
 
@@ -273,7 +382,7 @@ public partial class PanelWindow
     private void BeginHotkeyCapture()
     {
         _capturingHotkey = true;
-        HotkeyText.Text = "按下新组合键…";
+        HotkeyText.Text = Str.SetHotkeyCapturing;
         // 顺手复位颜色：万一上次的红字残留了下来，占位文字不该是红的
         HotkeyText.SetResourceReference(TextBlock.ForegroundProperty, "Ink2");
         // 这句提示现在要解释一种"什么都没发生"的情况：
@@ -282,7 +391,7 @@ public partial class PanelWindow
         // 用户看到的就是"按下没反应"，所以这里先把这个现象翻译成一句话说清楚。
         // 信息顺序是刻意的：状态栏宽约 418px、字号 10.5，TextBlock 又没设 TextTrimming，
         // 超长会被直接切掉 —— 所以要紧的原因排在前面，"Esc 取消"放最后（最不怕被切）。
-        Status("请按下新组合键（至少一个修饰键）；若按下后毫无反应，说明它已被其它程序占用。Esc 取消");
+        Status(Str.SetHotkeyCaptureHint);
 
         // 再钉一次焦点：点选项行这种不可聚焦的元素时，WPF 有可能把焦点挪走。
         // 焦点一丢，下面的按键就一个都收不到（原因见 OpenSettings 里那段注释）。
@@ -297,7 +406,7 @@ public partial class PanelWindow
     {
         _capturingHotkey = false;
         RefreshSettingVisuals();
-        Status("已取消");
+        Status(Str.StatusDragCancelled);
     }
 
     /// <summary>是不是正停在改键行上（供面板级的点击/按键守卫询问）。</summary>
@@ -340,21 +449,21 @@ public partial class PanelWindow
         // Win 组合由系统保留，注册基本必失败，不收
         if (mods.HasFlag(ModifierKeys.Windows) || key is Key.LWin or Key.RWin)
         {
-            Status("Win 组合由系统保留，请换一个");
+            Status(Str.SetHotkeyWinReserved);
             return true;
         }
 
         // 输入法/死键/类别标记，转出来不是有效虚拟键码
         if (!HotkeyChord.IsUsableKey(key))
         {
-            Status("这个键不能用作热键，请换一个");
+            Status(Str.SetHotkeyBadKey);
             return true;
         }
 
         if (mods == ModifierKeys.None || key is Key.LeftCtrl or Key.RightCtrl
             or Key.LeftAlt or Key.RightAlt or Key.LeftShift or Key.RightShift)
         {
-            Status("需要至少一个修饰键 + 一个普通键");
+            Status(Str.SetHotkeyNeedModifier);
             return true;
         }
 
@@ -378,7 +487,7 @@ public partial class PanelWindow
             _capturingHotkey = false;
             _store.State.Settings.Hotkey = chord.Display;
             _store.Save();
-            Status($"已改为 {chord}");
+            Status(string.Format(Str.SetHotkeyChanged, chord));
             RefreshSettingVisuals();
             return;
         }
@@ -393,8 +502,8 @@ public partial class PanelWindow
         // 就会把它恢复成旧键位，红字等于闪一下就没了 —— 那就还是没提示。
         // 留着的话，用户可以直接按下一个候选，不用再点一次那一行。
         ShowHotkeyProblem(result.Status == HotkeyStatus.Conflict
-            ? "有组合键冲突"
-            : $"注册失败（Win32 {result.Win32Error}）");
+            ? Str.SetHotkeyConflict
+            : string.Format(Str.SetHotkeyRegFailed, result.Win32Error));
 
         Status(result.Message);
     }

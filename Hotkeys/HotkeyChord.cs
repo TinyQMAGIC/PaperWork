@@ -13,11 +13,24 @@ internal readonly record struct HotkeyChord(uint Modifiers, uint VirtualKey, str
 {
     public uint ToModifierFlags() => Modifiers | Native.MOD_NOREPEAT;
 
-    /// <summary>默认 Ctrl+Alt+D。是否会被中文输入法抢，由 Spike S4 实机验证。</summary>
+    /// <summary>
+    /// 默认 <b>Alt+Space</b>（2026-10-17 起；原 Ctrl+Alt+D）。
+    ///
+    /// 这里只用于「state.json 里那串字解析不出来 / 没存过」时的兜底，所以必须和
+    /// <c>AppSettings.Hotkey</c> 的初始值保持同一个口径 —— 两边不一致会出现
+    /// 「首次默认是 Alt+Space、一旦解析失败却退回 Ctrl+Alt+D」这种说不通的行为。
+    ///
+    /// <b>实机验证（2026-10-17）</b>：Alt+Space 是 Windows 的"系统菜单"键，验证过三件事 ——
+    /// ① <c>RegisterHotKey(MOD_ALT|MOD_NOREPEAT, VK_SPACE)</c> 注册成功（本机没人占）；
+    /// ② 前台是 Notepad 时按下，本进程收到 <c>WM_HOTKEY</c>（连按两次都收到）；
+    /// ③ 该前台窗口<b>没有</b>弹出系统菜单（<c>#32768</c> 菜单窗口没出现）——
+    ///    全局注册抢在 <c>DefWindowProc</c> 的 SC_KEYMENU 之前。
+    /// 风险仍在：若别的程序先注册了它，注册会失败并退到 <c>FallbackChords</c>（已知，暂不做额外提示）。
+    /// </summary>
     public static HotkeyChord Default { get; } = new(
-        Native.MOD_CONTROL | Native.MOD_ALT,
-        (uint)KeyInterop.VirtualKeyFromKey(Key.D),
-        "Ctrl+Alt+D");
+        Native.MOD_ALT,
+        (uint)KeyInterop.VirtualKeyFromKey(Key.Space),
+        "Alt+Space");
 
     public static HotkeyChord FromInput(Key key, ModifierKeys mods)
     {

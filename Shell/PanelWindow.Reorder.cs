@@ -96,12 +96,20 @@ public partial class PanelWindow
     private const double InsertDeadZone = 4.0;
 
     /// <summary>新组合的默认名。用户拍板：不拿文件名当组合名，一律「未命名」。</summary>
-    private const string NewGroupName = "未命名";
+    private const string NewGroupName = Str.BoardUnnamed;
 
     private TileVm? _dragTile;
     private List<TileVm>? _dragOrder;
     private Point _dragStart;
     private bool _dragActive;
+
+    /// <summary>
+    /// <see cref="FinishDragVisual"/> 正在主动释放捕获时为 true。
+    /// 用来把「我们自己收尾」和「捕获被系统抢走」区分开 —— 两者都会触发
+    /// <c>LostMouseCapture</c>，但前者之后 <c>ReorderUp</c> 还要读 <c>_shown</c> 落盘，
+    /// 此刻若按"被抢走"处理去还原顺序，提交的就是原顺序，拖拽从此永远不生效。
+    /// </summary>
+    private bool _tearingDownDrag;
 
     /// <summary>这次拖的是组合栏本身。组合不当合并的源（两层封顶，D17）。</summary>
     private bool _dragIsGroup;
@@ -157,6 +165,7 @@ public partial class PanelWindow
 
         if (e.LeftButton != MouseButtonState.Pressed) return;
         if (SettingsPanel.Visibility == Visibility.Visible) return;
+        if (IconPickerVisible) return;      // 选图标页盖在磁贴上，底下不该还能起拖拽
 
         // 双击的**第二下**不参与拖拽：它紧接着就会换层（Activate → Render），
         // 而这次按下记下的是【旧层】那枚磁贴 —— 留着它，第二下按住时手一抖就会在新层上
@@ -419,7 +428,7 @@ public partial class PanelWindow
         {
             _store.MoveEntry(moving, gid);
             Render(animate: false);
-            Status("已并入组合");
+            Status(Str.StatusMerged);
         }
         else if (mergeWith is int other && dragged.EntryId is int self)
         {
@@ -456,30 +465,73 @@ public partial class PanelWindow
         e.Handled = true;   // 拖动过就不许再被当成一次单击
     }
 
-    /// <summary>Esc 取消正在进行的拖拽。返回 true 表示这次按键是被拖拽流程吃掉的。</summary>
-    private bool CancelDragIfAny()
+    /// <summary>
+    /// 把拖拽整体作废：视觉收干净 + 显示顺序还原成拖之前。
+    ///
+    /// <b>三个入口共用它，语义一律是「取消」而不是「提交」</b>：Esc 主动放弃、捕获被系统抢走、
+    /// 收起面板。三条路都意味着"用户没有完成这个动作"，替他提交一个没确认过的顺序更糟 ——
+    /// 尤其捕获被抢走那条，他回到桌面时看到的是拖到一半的中间态，那个顺序连他自己都没看过结果。
+    /// </summary>
+    private void AbortDrag()
     {
-        if (_dragTile is null) return false;
+        // 没有拖拽在飞时必须是纯空操作：OnPanelDeactivated 每次面板失活都会走到这里
+        // （点别的程序、弹重命名框、开文件选择框……），不该让一次普通的路径切换去碰拖拽状态。
+        if (_dragTile is null && !_dragActive) return;
 
         FinishDragVisual();
         RestoreOrder();
         _dragTile = null;
         _dragOrder = null;
+        _pressOnTile = false;
+    }
+
+    /// <summary>Esc 取消正在进行的拖拽。返回 true 表示这次按键是被拖拽流程吃掉的。</summary>
+    private bool CancelDragIfAny()
+    {
+        if (_dragTile is null) return false;
+
+        AbortDrag();
         _suppressClick = true;   // 紧接着的抬手不能变成"点开这个文件夹"
-        Status("已取消");
+        Status(Str.StatusDragCancelled);
         return true;
     }
 
     /// <summary>
     /// 收起面板时收掉拖拽残留（D18 的 OnBeforeHide 契约）。
     /// 窗口藏了却在屏幕上留一个幽灵图标飘着，是最难解释的一种孤儿态。
+    ///
+    /// 原来这里只清字段、<b>不还原顺序</b>，而 <c>_dragOrder</c> 一丢 <see cref="RestoreOrder"/>
+    /// 就再也执行不了 —— 于是「视图已重排 + 磁盘没写 + 快照已丢」同时成立：
+    /// 再呼出看到的是新顺序，随便进出一层又跳回旧的，用户看到的是"我明明排好了又回来了"。
     /// </summary>
-    internal void DropDragState()
+    internal void DropDragState() => AbortDrag();
+
+    /// <summary>
+    /// 鼠标捕获被抢走时的兜底（UAC 弹窗、Win+L、Ctrl+Alt+Del、别的窗口夺焦）。
+    ///
+    /// 这些情形下<b>松手那一下永远收不到</b>：<c>WM_LBUTTONUP</c> 不再投递给这个窗口，
+    /// <c>PreviewMouseLeftButtonUp</c> 永不触发；而清理出口原本只有 drop / Esc / 收面板三处，
+    /// 全都依赖主动事件到达。不兜住的后果：<c>DragGhost</c>（<c>Topmost=true</c>）永久浮在
+    /// 最上层、磁贴永久停在 <c>Opacity=0.4</c>、重排结果从未落盘，而且
+    /// <see cref="ReorderDown"/> 只清字段不收视觉，下一次正常拖拽也修不好上一次的残留。
+    ///
+    /// <b>单靠这一个事件不够</b>：会话切换（Win+L）时 WPF 未必送出 LostMouseCapture。
+    /// 所以另有两道 —— 窗口的 <c>Deactivated</c>，以及收起面板时的 <see cref="DropDragState"/>。
+    /// </summary>
+    private void OnDragCaptureLost(object sender, MouseEventArgs e)
     {
-        FinishDragVisual();
-        _dragTile = null;
-        _dragOrder = null;
+        if (_tearingDownDrag) return;   // 自己收的尾，不是被系统抢走
+        AbortDrag();
     }
+
+    /// <summary>
+    /// 面板失去激活时的兜底。与 <see cref="OnDragCaptureLost"/> 互补：捕获没丢但焦点被夺走
+    /// （UAC 的安全桌面、锁屏）时靠这一道。
+    ///
+    /// 不用担心误伤：<see cref="AbortDrag"/> 在没有拖拽在飞的时候是纯空操作，
+    /// 而重命名对话框 / 文件选择框 / 原生菜单把面板顶掉时，本来也不可能有拖拽在进行。
+    /// </summary>
+    private void OnPanelDeactivated(object? sender, EventArgs e) => AbortDrag();
 
     /// <summary>
     /// <b>换层时作废拖拽上下文</b>（2026-10-01）。所有"进到另一层"的入口都要调它：
@@ -521,7 +573,7 @@ public partial class PanelWindow
         if (!MergeAllowedHere)
         {
             // 理论上到不了这里：ReorderMove 在非主界面根本不点亮 MergeHint
-            Status("组合内不能再放组合");
+            Status(Str.StatusGroupInGroup);
             return;
         }
 
@@ -530,13 +582,13 @@ public partial class PanelWindow
 
         if (group is null)
         {
-            Status("合并失败");
+            Status(Str.StatusMergeFailed);
             return;
         }
 
         // 主界面先渲染组合、再渲染条目，所以新组合会出现在组合区的末尾。
         // 不自动钻进去——连续整理的时候被强行切走上下文比"东西看着不见了"更烦。
-        Status($"已新建组合「{group.Title}」，2 项已收纳");
+        Status(string.Format(Str.StatusNewGroupCreated, group.Title));
         FlashNewGroup(group.Id);
     }
 
@@ -828,7 +880,14 @@ public partial class PanelWindow
         ClearHints();
         _decided = false;
         _insertSlot = -1;
+
+        // 自己释放捕获同样会触发 LostMouseCapture —— 不挡的话 OnDragCaptureLost 会
+        // 在 ReorderUp 还没读 _shown 落盘之前就把顺序还原回去，表现成"拖了但永远回到旧布局"
+        // （2026-10-12 用户实报的回归，正是漏了这道闸）。
+        _tearingDownDrag = true;
         if (Tiles.IsMouseCaptured) Tiles.ReleaseMouseCapture();
+        _tearingDownDrag = false;
+
         _ghost?.HideGhost();
         _dragActive = false;
     }

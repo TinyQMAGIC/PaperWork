@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Media;
+using Paperwork.Data;   // Str：主题名 / 纸张名也是界面文案，走 tools\ui-strings.tsv
 
 namespace Paperwork.Themes;
 
@@ -27,18 +28,18 @@ public static class Palette
 {
     public static readonly IReadOnlyList<Accent> Accents =
     [
-        new("forest", "森林绿", "#2F6B4F", "#6FBF97"),
-        new("sky",    "天空蓝", "#2E7BB5", "#68B6E8"),
-        new("sunset", "夕阳橙", "#D2762E", "#EFA25C")
+        new("forest", Str.PaletteAccentForest, "#2F6B4F", "#6FBF97"),
+        new("sky",    Str.PaletteAccentSky,    "#2E7BB5", "#68B6E8"),
+        new("sunset", Str.PaletteAccentSunset, "#D2762E", "#EFA25C")
     ];
 
     public static readonly IReadOnlyList<Paper> Papers =
     [
-        new("ivory", "象牙纸", "#F4EFE3", "#EDE6D6", "#DCCFB4", "#DED6C4",
+        new("ivory", Str.PalettePaperIvory, "#F4EFE3", "#EDE6D6", "#DCCFB4", "#DED6C4",
             "#2B2A26", "#6E6A5F", "#A29C8D", Night: false),
-        new("kraft", "牛皮纸", "#E8DCC2", "#DFD0B0", "#C9B48A", "#CDBA97",
+        new("kraft", Str.PalettePaperKraft, "#E8DCC2", "#DFD0B0", "#C9B48A", "#CDBA97",
             "#33291B", "#6B5A3E", "#9C8862", Night: false),
-        new("night", "夜空纸", "#23211D", "#2C2A25", "#3E3A32", "#3C3830",
+        new("night", Str.PalettePaperNight, "#23211D", "#2C2A25", "#3E3A32", "#3C3830",
             "#EDE7DA", "#ABA493", "#6F695D", Night: true)
     ];
 

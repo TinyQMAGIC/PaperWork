@@ -85,12 +85,17 @@ internal static class SearchService
             var (text, score) = Split(name, query);
             if (score == 0) continue;
 
+            // 预设图形在最上层：**盖住类型线稿，也不再去解真图标**（与磁贴同一口径：
+            // TileVm.HasPresetGlyph / WantsShellIcon）。结果行与磁贴必须是同一个脸，
+            // 否则"搜到了却认不出是哪一个"（组合那条 2026-09-30 就修过一次）。
+            var preset = Glyphs.Group.Find(e.PresetIcon);
+
             ranked.Add((0, score, name, new SearchHit(
                 SearchHitKind.Entry, text, MatchText.Plain(e.Path),
-                Glyphs.ForPath(e.Path, e.IsDir), e.Path, e.IsDir, e.Id, null, null,
+                preset ?? Glyphs.ForPath(e.Path, e.IsDir), e.Path, e.IsDir, e.Id, null, null,
                 // 程序/快捷方式与显式改过图标的，结果行里给真图标——
                 // VS Code 和微信长得完全不一样，线稿反而是丢信息（与磁贴 WantsShellIcon 同一口径）
-                Glyphs.IsProgram(e.Path) || e.Icon is not null)));
+                preset is null && (Glyphs.IsProgram(e.Path) || e.Icon is not null))));
         }
 
         // ---- 组合 ----
@@ -100,9 +105,11 @@ internal static class SearchService
             if (score == 0) continue;
 
             int count = entries.Count(x => x.GroupId == g.Id);
+            // 组合换过分类图标就把那张图形也带上：结果行与磁贴必须是同一个脸，
+            // 否则"搜到了却认不出是哪一个"。没换过的仍然给 null —— 模板那边会画 2×2。
             ranked.Add((1, score, g.Title, new SearchHit(
-                SearchHitKind.Group, text, MatchText.Plain($"组合 · {count} 项"),
-                null, null, false, null, g.Id, null)));
+                SearchHitKind.Group, text, MatchText.Plain(string.Format(Str.SearchGroupHit, count)),
+                Glyphs.Group.Find(g.Icon), null, false, null, g.Id, null)));
         }
 
         // ---- 备忘：标题 + 正文 ----

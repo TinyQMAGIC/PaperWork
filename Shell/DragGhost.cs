@@ -256,7 +256,9 @@ internal sealed class DragGhost : Window
         // <c>HasGlyphData</c> / <c>HasGlyphText</c> 里都已经含了"真图标到了就让位"这条约定，
         // 手写一遍条件就会漏档 —— 2026-10-01 漏掉预设线稿那一档就是这么来的
         // （文件夹拖起来是空框、.txt 显示成 "TXT" 文字）。
-        bool mini = tile.IsGroupTile && tile.Icon is null;
+        // 组合选过分类图标就不再画 2×2，改画那张图形（与磁贴模板同一口径：
+        // 判定交给 HasGroupGlyph，别在这儿重推条件 —— 上面那段注释就是为这条写的）。
+        bool mini = tile.IsGroupTile && !tile.HasGroupGlyph;
 
         _art.Visibility = !mini && tile.HasIcon ? Visibility.Visible : Visibility.Collapsed;
 

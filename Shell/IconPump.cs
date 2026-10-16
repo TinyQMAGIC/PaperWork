@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -54,6 +55,24 @@ public sealed class IconPump : IDisposable
     private readonly Dictionary<string, LinkedListNode<CacheEntry>> _index = new(StringComparer.OrdinalIgnoreCase);
     private readonly LinkedList<CacheEntry> _lru = new();
     private readonly object _gate = new();
+
+    /// <summary>
+    /// 已知连不上的 UNC 主机 → 记下来的时刻（TickCount64）。<see cref="DeadHostTtlMs"/> 内过期。
+    /// </summary>
+    private readonly Dictionary<string, long> _deadHosts = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 熔断记忆保留多久。太短等于没熔断（一次呼出就过期），太长会让"网盘刚重新上线"
+    /// 半分钟内还显示灰的。30 秒是"人手一次操作的间隔"这个量级。
+    /// </summary>
+    private const long DeadHostTtlMs = 30_000;
+
+    // 这里**刻意没有**「在途去重」。加过一版（_inFlight：同 key 已在队列里就不再排），
+    // 结果是个真回归：Render 每次都重建 TileVm 实例，启动时 OnSourceInitialized 与
+    // OnAfterShow 各 Render 一次 —— 第二次的实例上屏时，第一个实例的请求还在途，
+    // 去重把第二次的请求丢掉，worker 回来只 Apply 到那个已经不在视觉树上的孤儿实例，
+    // 屏上的磁贴就永远停在推导名（badge-size 而不是 badge-size.html）。
+    // 重复排队的代价只是同一条多查一遍 Shell；去重的代价是显示名永久缺失。别再加回来。
 
     /// <summary>当前缓存里的位图占的像素字节数。用条目数当上限会被 DPI 打穿：
     /// 56px 档在 200% 缩放下实际是 112px，单张 50KB——512 条就是 25MB，
@@ -139,23 +158,100 @@ public sealed class IconPump : IDisposable
             if (tile.Kind is TileKind.Group or TileKind.More) continue;
             if (string.IsNullOrWhiteSpace(tile.Path)) continue;
 
+            // 离线主机熔断。worker 只有一条且串行，一条掉线 UNC 的 File.Exists 能卡几十秒，
+            // 把整条队列 —— 包括所有磁贴的显示名与失效判定 —— 一起拖死，观感等同假死。
+            // 30 秒内同主机的路径直接按失效处理、不进队列。
+            // 第一次碰到仍会卡一次，卡完就记住（用户拍板接受这个代价，不加线程）。
+            if (IsUnc(tile.Path) && KnownDeadHost(tile.Path) is string deadHost)
+            {
+                Apply(tile, DeadEntry(tile.Path, string.Format(Str.LogNetHostUnavailable, deadHost)));
+                continue;
+            }
+
             string key = CacheKey(tile, targetPx);
 
+            CacheEntry? hit = null;
             lock (_gate)
             {
-                if (_index.TryGetValue(key, out var hit))
+                if (_index.TryGetValue(key, out var node))
                 {
-                    Touch(hit);
-                    Apply(tile, hit.Value);
-                    continue;
+                    Touch(node);
+                    hit = node.Value;
                 }
             }
 
-            // 要不要真图由磁贴自己说了算（TileVm.WantsShellIcon）：程序/快捷方式与显式改图标的取，
-            // 其余文件类只查显示名与失效判定。别小看这一句——原来进一个 30 项的文件夹，
-            // 30 个普通文件每张图都要 Shell 同步渲染一遍再白存进缓存（42px 档 ≈0.2MB、
-            // 56px@200% 档 ≈1.5MB），而界面上这些磁贴显示的是预设线稿，取回来就扔。
-            _queue.Writer.TryWrite(new Request(tile, key, targetPx, tile.WantsShellIcon));
+            // Apply 会改 TileVm 的属性、同步驱动 WPF 绑定更新，绝不能在持锁期间跑
+            // （原来它在 lock 里面）。取锁只为读缓存，出锁再写 UI。
+            // 缓存没命中就照排：不做在途去重，理由见字段区那段注释。
+            if (hit is not null) Apply(tile, hit);
+            else
+            {
+                // 要不要真图由磁贴自己说了算（TileVm.WantsShellIcon）：程序/快捷方式与显式改图标的取，
+                // 其余文件类只查显示名与失效判定。别小看这一句——原来进一个 30 项的文件夹，
+                // 30 个普通文件每张图都要 Shell 同步渲染一遍再白存进缓存（42px 档 ≈0.2MB、
+                // 56px@200% 档 ≈1.5MB），而界面上这些磁贴显示的是预设线稿，取回来就扔。
+                _queue.Writer.TryWrite(new Request(tile, key, targetPx, tile.WantsShellIcon));
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- 离线主机熔断
+
+    private static bool IsUnc(string path) => path.StartsWith(@"\\", StringComparison.Ordinal);
+
+    /// <summary><c>\\host\share\...</c> 里的 host。</summary>
+    private static string UncHostOf(string path)
+    {
+        int slash = path.IndexOf('\\', 2);
+        return slash > 2 ? path[2..slash] : path[2..];
+    }
+
+    private string? KnownDeadHost(string path)
+    {
+        string host = UncHostOf(path);
+        lock (_gate)
+        {
+            long now = Environment.TickCount64;
+            // 顺手清过期的，别让这张表只增不减
+            foreach (var stale in _deadHosts.Where(kv => now - kv.Value > DeadHostTtlMs)
+                                            .Select(kv => kv.Key).ToList())
+                _deadHosts.Remove(stale);
+
+            return _deadHosts.ContainsKey(host) ? host : null;
+        }
+    }
+
+    private void RememberDeadHost(string path)
+    {
+        if (!IsUnc(path)) return;
+        lock (_gate) _deadHosts[UncHostOf(path)] = Environment.TickCount64;
+    }
+
+    private static CacheEntry DeadEntry(string path, string reason) =>
+        new(path, null, System.IO.Path.GetFileName(path.TrimEnd('\\', '/')),
+            string.Empty, false, reason);
+
+    /// <summary>
+    /// 某个文件夹的磁盘内容变了：把该目录下所有缓存条目丢掉。
+    /// 「路径没变但 Shell 结论变了」（外面改了名、快捷方式换了目标）靠这个定点失效；
+    /// 不这么做的话缓存只写不删，结论永远停在第一次查到的那一刻。
+    /// </summary>
+    public void InvalidateUnder(string folderPath)
+    {
+        if (string.IsNullOrWhiteSpace(folderPath)) return;
+        string prefix = folderPath.TrimEnd('\\', '/') + "\\";
+
+        lock (_gate)
+        {
+            foreach (var key in _index.Keys.Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                                           .ToList())
+            {
+                if (_index.Remove(key, out var node))
+                {
+                    _pixels -= PixelsOf(node.Value.Image);
+                    _lru.Remove(node);
+                }
+            }
         }
     }
 
@@ -203,7 +299,14 @@ public sealed class IconPump : IDisposable
             else Interlocked.Increment(ref _failed);
         }
 
-        Insert(entry);
+        // 失效结论<b>不进缓存</b>：「死」是这条链上最容易翻案的状态（回收站还原、
+        // 网盘重新上线、U 盘插回来），而「活着 + 图标长什么样」几乎不变。
+        // 原来缓存只写不删，灰掉的磁贴就永远灰着 —— 还原了也看不见。
+        // 不缓存之后，下次呼出会重新问一次 Shell，翻案立刻可见；
+        // 本地路径的 File.Exists 很便宜，掉线 UNC 则由上面的熔断器挡着。
+        if (entry.Exists) Insert(entry);
+        else RememberDeadHost(req.Tile.Path);
+
         Apply(req.Tile, entry);
     }
 

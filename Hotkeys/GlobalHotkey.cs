@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using Paperwork.Data;   // Str：热键状态提示也是界面文案
 using Paperwork.Shell;
 
 namespace Paperwork.Hotkeys;
@@ -16,9 +17,9 @@ internal sealed record HotkeyResult(HotkeyStatus Status, int Win32Error = 0)
 
     public string Message => Status switch
     {
-        HotkeyStatus.Ok => "已生效",
-        HotkeyStatus.Conflict => "该热键已被其他程序占用，请换一个",
-        _ => $"注册失败（Win32 {Win32Error}）"
+        HotkeyStatus.Ok => Str.SetHotkeyActive,
+        HotkeyStatus.Conflict => Str.SetHotkeyTaken,
+        _ => string.Format(Str.SetHotkeyRegFailed, Win32Error)
     };
 }
 

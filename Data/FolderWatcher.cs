@@ -26,7 +26,12 @@ public sealed class FolderWatcher : IDisposable
     private readonly DispatcherTimer _debounce;
     private FileSystemWatcher? _watcher;
 
-    public string? Path { get; private set; }
+    /// <summary>
+    /// 当前监听目标。<b>不叫 Path</b>：那个名字会遮蔽 <c>System.IO.Path</c>，
+    /// 类内任何一处 <c>Path.GetFileName(...)</c> 都会静默绑到这个属性上而不是静态类 ——
+    /// 编译照过、运行出错，是那种查半天的坑。
+    /// </summary>
+    public string? WatchedPath { get; private set; }
 
     public event Action? Changed;
 
@@ -43,7 +48,7 @@ public sealed class FolderWatcher : IDisposable
     /// <summary>切到新的监听目标。传 null 或同一路径表示不动 / 停止。</summary>
     public void Watch(string? path)
     {
-        if (string.Equals(path, Path, StringComparison.OrdinalIgnoreCase)) return;
+        if (string.Equals(path, WatchedPath, StringComparison.OrdinalIgnoreCase)) return;
 
         Stop();
         if (string.IsNullOrWhiteSpace(path)) return;
@@ -65,7 +70,7 @@ public sealed class FolderWatcher : IDisposable
             w.EnableRaisingEvents = true;
 
             _watcher = w;
-            Path = path;
+            WatchedPath = path;
         }
         catch (Exception ex)
         {
@@ -88,7 +93,7 @@ public sealed class FolderWatcher : IDisposable
             _dispatcher.BeginInvoke(() =>
             {
                 Stop();
-                Failed?.Invoke("监听已中断，重新进入该文件夹可恢复");
+                Failed?.Invoke(Str.StatusWatcherBroken);
             });
         }
         catch (Exception)
@@ -130,7 +135,7 @@ public sealed class FolderWatcher : IDisposable
     public void Stop()
     {
         _debounce.Stop();
-        if (_watcher is null) { Path = null; return; }
+        if (_watcher is null) { WatchedPath = null; return; }
 
         _watcher.EnableRaisingEvents = false;
         _watcher.Created -= OnSignal;
@@ -139,7 +144,7 @@ public sealed class FolderWatcher : IDisposable
         _watcher.Error -= OnError;
         _watcher.Dispose();
         _watcher = null;
-        Path = null;
+        WatchedPath = null;
     }
 
     public void Dispose() => Stop();

@@ -97,7 +97,21 @@ public sealed class NavStack
     }
 }
 
-/// <summary>一个条目。任意文件都统一成这个形状（D11），类型只在"是目录"时显式记一笔。</summary>
+/// <summary>
+/// 一个条目。任意文件都统一成这个形状（D11），类型只在"是目录"时显式记一笔。
+///
+/// <b>图标是三层，从上往下（2026-10-14）：</b>
+/// <list type="number">
+///   <item><see cref="PresetIcon"/> —— 用户从预设图标族（<see cref="Glyphs.Group"/>，60 个）里挑的 key，
+///         <b>盖住下面两层</b>：程序/快捷方式的真 Shell 图标也会被它盖住（用户显式指定，不算"抢"）；</item>
+///   <item><see cref="Icon"/> —— 用户「更改图标…」挑的图标文件（.ico/.exe）路径；</item>
+///   <item>磁贴自己的图标 —— 程序/快捷方式 = 真 Shell 图标，文件 = 类型线稿，文件夹 = 文件夹线稿。</item>
+/// </list>
+/// 「恢复默认图标」<b>一次把上面两层都清掉</b>回到第 3 层，不做两套逻辑 ——
+/// 所以第 3 层不需要存：真图标由 <c>IconPump</c> 现取，线稿由扩展名映射，全是派生值。
+/// </summary>
+/// <param name="Icon">自定义图标文件的<b>路径</b>（不是 key）。null = 没改过。</param>
+/// <param name="PresetIcon">预设图标的 <b>key</b>（例如 <c>"game"</c> / <c>"toolbox"</c>）。null = 没选过。</param>
 public sealed record EntryItem(
     int Id,
     int? GroupId,
@@ -105,10 +119,18 @@ public sealed record EntryItem(
     string? Label,
     int Sort,
     bool IsDir,
-    string? Icon = null);
+    string? Icon = null,
+    string? PresetIcon = null);
 
-/// <summary>一个组合栏。没有 parent 字段——两层封顶（D17）。</summary>
-public sealed record GroupItem(int Id, string Title, int Sort);
+/// <summary>
+/// 一个组合栏。没有 parent 字段——两层封顶（D17）。
+///
+/// <paramref name="Icon"/> 是**组合磁贴选的分类图标 key**（<see cref="Glyphs.Group"/> 里的键，
+/// 例如 <c>"game"</c> / <c>"device"</c>）。null = 没选过，磁贴还是那个 2×2 迷你格。
+/// 存 key 不存图形：key 是稳定标识，改画（换路径）不影响老数据；认不出来的 key 会让磁贴落回 2×2，
+/// 不会变成空框（见 <see cref="Glyphs.Group.Find"/>）。
+/// </summary>
+public sealed record GroupItem(int Id, string Title, int Sort, string? Icon = null);
 
 /// <summary>
 /// 一条备忘。**备忘是数据，不是文件**，所以不能塞进 <see cref="EntryItem"/>：
@@ -125,10 +147,18 @@ public sealed record NoteItem(int Id, string Title, string Body, bool Pinned, lo
 public enum SummonAnchor { FollowCursor, RememberedPosition }
 
 /// <summary>持久化的外观与行为。字段名即 state.json 里的 camelCase 键。</summary>
+/// <summary>
+/// 持久化的外观与行为。字段名即 state.json 里的 camelCase 键。
+///
+/// <b>下面这批初始值 = 「首次启动」的默认值</b>：只有<b>没有 state.json</b> 时才会用到
+/// （<see cref="StateStore"/> 读不出来就 <c>new AppState()</c>）。存过盘的用户一律用文件里的值，
+/// 改这些初始值<b>不会影响已有用户</b> —— 要看到新默认值，得是全新安装（或把 state.json 挪走）。
+/// </summary>
 public sealed class AppSettings
 {
     public string Accent { get; set; } = "forest";
-    public string Paper { get; set; } = "ivory";
+    /// <summary>牛皮纸（2026-10-17 起；原象牙）。配森林绿就是默认的那一套。</summary>
+    public string Paper { get; set; } = "kraft";
     /// <summary>32 / 42 / 56</summary>
     public int IconSize { get; set; } = 42;
     public SummonAnchor Anchor { get; set; } = SummonAnchor.FollowCursor;
@@ -139,13 +169,24 @@ public sealed class AppSettings
 
     /// <summary>
     /// 前台进入「铺满整块显示器」的应用时，是否自动收起面板（D28）。
-    /// 默认<b>关</b>：全屏的 IDE / 远程桌面等「工作型全屏」会被这条误伤，
-    /// 而 D5 的精神是"藏不藏由用户按热键决定"。勾上即 M4-P1 的老行为。
-    /// 旧数据里没有这个字段，反序列化落到默认值，正好就是"不自动收起"。
+    /// <b>2026-10-17 起默认改为「开」</b>：用户拍板"行为那一段四项全部默认打开"，
+    /// 而另外三项（跟随系统启动 / 点 X 收托盘 / 组合角标）本来就是 true —— 实际改的就是这一条。
+    ///
+    /// ⚠️ 这是<b>对 D28 的反向决定</b>：D28 当初定默认关，理由是全屏的 IDE / 远程桌面等
+    /// 「工作型全屏」会被误伤（面板被自作主张藏起来打断工作）。代价与理由见 README
+    /// 「首次启动的默认值」那条，需要的人仍然可以在设置里关掉。
+    ///
+    /// ⚠️ 已知的边界（做法 1 的固有代价）：一份<b>很旧</b>的 state.json（这个字段还没出现时的版本）
+    /// 缺字段时会反序列化落到初始值，那位用户的此项会被静默打开。近几个版本存的文件都带这个字段，
+    /// 风险只落在考古数据上 —— 已评估并接受，如要杜绝得改成"首次运行专用工厂"（多维护一套默认值）。
     /// </summary>
-    public bool HideOnFullscreen { get; set; } = false;
-    /// <summary>人类可读形式，如 "Ctrl+Alt+D"。实际注册用启动时解析的结果。</summary>
-    public string Hotkey { get; set; } = "Ctrl+Alt+D";
+    public bool HideOnFullscreen { get; set; } = true;
+    /// <summary>
+    /// 人类可读形式，如 "Alt+Space"。实际注册用启动时解析的结果。
+    /// <b>2026-10-17 起默认 Alt+Space</b>（原 Ctrl+Alt+D）。实机验过（见 HotkeyChord.Default）：
+    /// 能注册成功，且前台是别的程序时按下能收到按键、那个程序不会弹它的系统菜单。
+    /// </summary>
+    public string Hotkey { get; set; } = "Alt+Space";
 }
 
 public sealed class AppState

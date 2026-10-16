@@ -32,6 +32,21 @@ public sealed class TileVm : INotifyPropertyChanged
     /// <summary>用户指定的自定义图标文件（.ico / .exe）。M2 的"改图标"。</summary>
     public string? CustomIcon { get; init; }
 
+    /// <summary>
+    /// 组合磁贴选的分类图标 key（<see cref="Glyphs.Group"/> 的键）。null = 没选过。
+    /// 与 <see cref="CustomIcon"/> 是两码事：那个是"磁盘上的一个图标文件"，这个是"预设图标族里的一个名字"。
+    /// </summary>
+    public string? GroupIcon { get; init; }
+
+    /// <summary>
+    /// <b>条目</b>磁贴选的预设图标 key（与组合同一族 <see cref="Glyphs.Group"/>）。null = 没选过。
+    ///
+    /// 它在图标三层的<b>最上层</b>：盖住自定义图标（<see cref="CustomIcon"/>），
+    /// 也盖住程序/快捷方式的真 Shell 图标 —— 那条"文件类不抢真图标"是**自动**推断的规矩，
+    /// 用户**显式**挑的图形不算抢（2026-10-14 定的口径，手册 §0 第 3 条要补这条例外）。
+    /// </summary>
+    public string? PresetIcon { get; init; }
+
     /// <summary>M1 的占位字形（扩展名大写）。拿到真实图标后自动让位。</summary>
     public string Glyph { get; init; } = string.Empty;
 
@@ -75,7 +90,9 @@ public sealed class TileVm : INotifyPropertyChanged
     public string DisplayGlyph => GlyphOrNone;
 
     /// <summary>悬停提示：正常显示名字，失效时多一行原因。</summary>
-    public string Tip => IsDead ? $"{Label}\n{(string.IsNullOrEmpty(DeadReason) ? "路径不可用" : DeadReason)}" : Label;
+    public string Tip => IsDead
+        ? $"{Label}\n{(string.IsNullOrEmpty(DeadReason) ? Str.BoardPathUnavailable : DeadReason)}"
+        : Label;
 
     private string _label = string.Empty;
     /// <summary>先显示从路径推导的名字，Shell 显示名到了再替换。</summary>
@@ -102,25 +119,48 @@ public sealed class TileVm : INotifyPropertyChanged
     /// <summary>
     /// 预设图形（UI 手册 §6 的图标族，<see cref="Glyphs"/> 生成自 design/ui-mock.html）。
     /// 按 Kind 与文件类型取，**不查 Shell**——所以拖进来立刻就有形状，不用等图标解码。
+    /// 组合是例外：**没选图标时这里是 null**（那一格画 2×2 迷你格），选过才给分类图形。
     /// </summary>
+    /// <summary>条目自己选的那张预设图形。null = 没选过（那就还是类型线稿 / 真图标）。</summary>
+    private Geometry? PresetGlyph => Kind == TileKind.Group ? null : Glyphs.Group.Find(PresetIcon);
+
     public Geometry? GlyphData => _glyphData ??= Kind switch
     {
-        TileKind.Group => null,                                  // 组合走 2x2 迷你格
+        TileKind.Group => Glyphs.Group.Find(GroupIcon),          // null = 还是 2x2 迷你格
         TileKind.Ghost => Glyphs.Drop,
         TileKind.More => Glyphs.More,
-        _ => Glyphs.ForPath(Path, Kind == TileKind.Folder)
+        // 预设 > 类型线稿：条目选过就画那张，没选过才是"按文件类型给的那张"
+        _ => PresetGlyph ?? Glyphs.ForPath(Path, Kind == TileKind.Folder)
     };
     private Geometry? _glyphData;
 
-    /// <summary>有预设图形、且还没被真图标顶掉时显示它。</summary>
-    public bool HasGlyphData => GlyphData is not null && _icon is null;
+    /// <summary>
+    /// 有预设图形、且还没被真图标顶掉时显示它。
+    /// <b>条目选过预设就不能被顶掉</b> —— 那是用户显式挑的，优先级高于真图标（见 <see cref="HasPresetGlyph"/>）。
+    /// </summary>
+    public bool HasGlyphData => GlyphData is not null && (_icon is null || HasPresetGlyph);
+
+    /// <summary>
+    /// 条目选过预设图形。**它在最上层，压过真图标**：<see cref="HasIcon"/> 会因为它是 false
+    /// （真图标贴片收起），而 <see cref="HasGlyphData"/> 仍是 true（画这张图形）。
+    /// 组合那一档看 <see cref="HasGroupGlyph"/> —— 它要藏的是 2×2 迷你格，是另一件事。
+    /// </summary>
+    public bool HasPresetGlyph => PresetGlyph is not null;
+
+    /// <summary>
+    /// 组合选了分类图标。模板用它把 2×2 迷你格藏掉 —— **两者互斥**：
+    /// 有图形的组合画图形，没图形的组合画 2×2（手册 §4.5）。
+    /// </summary>
+    public bool HasGroupGlyph => IsGroupTile && GlyphData is not null;
 
     /// <summary>
     /// 要不要解真 Shell 图标。**只给两类**：程序/快捷方式（VS Code / 微信 / Steam 这类图标的
     /// 辨识度就是内容本身）与用户显式「改图标」指定的；其余文件类一律预设线稿——
     /// 否则观感被各软件的图标带走，UI 手册 §0 的第 3 条硬约束就破了。
     /// </summary>
-    public bool WantsShellIcon => CustomIcon is not null || Glyphs.IsProgram(Path);
+    /// 条目选了预设就不去解真图标了：那张图反正被盖住，省一次解码 + 一份位图内存。
+    /// 代价是「恢复默认」之后必须补一次 <c>ScheduleIcons()</c>（菜单那条链已经这么写了）。
+    public bool WantsShellIcon => !HasPresetGlyph && (CustomIcon is not null || Glyphs.IsProgram(Path));
 
     private bool _isDead;
     public bool IsDead
@@ -155,7 +195,8 @@ public sealed class TileVm : INotifyPropertyChanged
         }
     }
 
-    public bool HasIcon => _icon is not null;
+    /// <summary>画真图标贴片。条目选了预设就<b>不画</b> —— 预设在最上层（见 <see cref="HasPresetGlyph"/>）。</summary>
+    public bool HasIcon => _icon is not null && !HasPresetGlyph;
 
     // 原先这里有个 Highlighted（搜索命中时给整块磁贴换底色）。
     // 搜索改成全局之后不再按查询过滤磁贴，它没人用了 —— 直接删，不留死代码。
@@ -224,7 +265,8 @@ public static class BoardBuilder
     private const int CountCap = 500;
 
     /// <summary>文件夹层读取中的占位副标题。</summary>
-    public const string FolderLoadingText = "正在读取该文件夹…";
+    // 界面文字一律走 Str（tools/ui-strings.tsv），不许在这里写中文 —— 英文版靠替换这一份常量切换。
+    public const string FolderLoadingText = Str.BoardFolderLoading;
 
     /// <summary>
     /// 文件夹层的空壳：<b>不做任何 IO</b>，只给出标题 / 路径，磁贴列表为空。
@@ -268,7 +310,8 @@ public static class BoardBuilder
                 Kind = TileKind.Group,
                 Path = string.Empty,
                 Label = g.Title,
-                Count = badge ? store.EntriesIn(g.Id).Count() : 0
+                Count = badge ? store.EntriesIn(g.Id).Count() : 0,
+                GroupIcon = g.Icon
             }));
         }
 
@@ -284,16 +327,16 @@ public static class BoardBuilder
         int groups = store.State.Groups.Count;
         int entries = store.State.Entries.Count;
         return groups == 0 && entries == 0
-            ? "把任意文件拖进来"
-            : $"{entries} 项 · {groups} 个组合";
+            ? Str.BoardEmptyTitle
+            : string.Format(Str.BoardRootSubtitle, entries, groups);
     }
 
     private static Board BuildGroup(StateStore store, NavFrame frame)
     {
         var g = store.Group(frame.Id);
-        string title = g?.Title ?? "组合";
+        string title = g?.Title ?? Str.BoardGroupWord;
         var tiles = store.EntriesIn(frame.Id).Select(FromEntry).ToList();
-        return new Board(title, $"{tiles.Count} 项 · 拖到此处即加入本组合", NavKind.Group, frame.Id, null, tiles);
+        return new Board(title, string.Format(Str.BoardGroupSubtitle, tiles.Count), NavKind.Group, frame.Id, null, tiles);
     }
 
     /// <summary>
@@ -339,16 +382,19 @@ public static class BoardBuilder
                 });
             }
 
+            // 两个数字都走格式串：中英文语序不一样，插值字符串会把语序焊死
             subtitle = total > tiles.Count
-                ? $"共 {(total >= CountCap ? $"{CountCap}+" : total.ToString())} 项 · 已显示前 {tiles.Count} 项"
-                : $"{tiles.Count} 项";
+                ? string.Format(Str.BoardFolderCountCapped,
+                                total >= CountCap ? $"{CountCap}+" : total.ToString(),
+                                tiles.Count)
+                : string.Format(Str.BoardFolderCount, tiles.Count);
 
             if (total > tiles.Count)
-                tiles.Add(new TileVm { Kind = TileKind.More, Path = path, Label = "在资源管理器中打开" });
+                tiles.Add(new TileVm { Kind = TileKind.More, Path = path, Label = Str.BoardOpenInExplorer });
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or ArgumentException)
         {
-            subtitle = "无法读取该文件夹";
+            subtitle = Str.BoardFolderReadFailed;
         }
 
         return new Board(frame.Title, subtitle, NavKind.Folder, null, path, tiles);
@@ -365,6 +411,7 @@ public static class BoardBuilder
             Label = name,
             HasCustomLabel = e.Label is not null,
             CustomIcon = e.Icon,
+            PresetIcon = e.PresetIcon,
             Glyph = e.IsDir ? string.Empty : Path.GetExtension(e.Path).TrimStart('-').ToUpperInvariant()
         };
     }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Principal;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -35,6 +36,25 @@ public partial class App : Application
         base.OnStartup(e);
 
         DispatcherUnhandledException += OnUnhandled;
+
+        // 另两层必须一起装上：UI 线程之外没有任何东西护着。
+        //
+        // 真正裸奔的两条路 ——
+        //   ① FullscreenWatch 的 win-event 回调：从原生栈里直接进来，不在任何
+        //      DispatcherOperation 内，DispatcherUnhandledException 接不住；
+        //   ② IconPump 那条专用 STA 线程：它只在读队列和 Shell 查询两处包了 try，
+        //      其余任何一处抛出去就是整进程结束、一行日志都不留。
+        // AppDomain 这一层拦不住终止（也没打算拦），它的价值只有"死之前把现场写下来"。
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            LogError(Str.LogAppDomainUnhandled + args.ExceptionObject);
+
+        // 未观察的 Task 异常。SetObserved 是必须的：不调它，终结器会把这个异常
+        // 重新抛到 AppDomain 那一层去（.NET 4.5+ 默认不再因此终止进程，但会留一条脏记录）。
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            LogError(Str.LogTaskUnobserved + args.Exception);
+            args.SetObserved();
+        };
 
         // 自检模式：不建窗口不弹菜单，只验证 Shell 管线，供脚本调用。
         // 放在单实例检查之前，探针不该把已有实例唤起来。
@@ -70,14 +90,16 @@ public partial class App : Application
         window.ExitRequested += (_, _) => ExitApp();
 
         if (elevated)
-            tray.Balloon("不要用管理员身份运行 Paperwork",
-                "Windows 的 UIPI 会阻止资源管理器向提权进程拖放文件，" +
-                "「把文件拖进来」这个核心功能会完全失效。请以普通权限启动。");
+            tray.Balloon(Str.TrayNoAdmin,
+                Str.TrayNoAdminLine1 +
+                Str.TrayNoAdminLine2);
 
         // 数据没读出来必须当场说：这时候面板是空的，用户随手一拖就会 Save() 覆盖原文件。
         // 坏文件在 StateStore.Load 里已经另存成 state.json.corrupt-<时间戳> 了。
+        // 拼全部问题而不是只取第一条：现在一次读盘可能同时报「跳过 N 条脏记录」和
+        // 「M 条退回主界面」，只弹第一条会把另一半藏掉。
         if (window.DataProblems.Count > 0)
-            tray.Balloon("面板数据没能读出来", window.DataProblems[0]);
+            tray.Balloon(Str.TrayDataIncomplete, string.Join(Environment.NewLine, window.DataProblems));
 
         var hotkey = new GlobalHotkey(window.Handle);
         _hotkey = hotkey;
@@ -98,16 +120,32 @@ public partial class App : Application
             }
 
             if (result.Success)
-                tray.Balloon("Paperwork 已启动", $"默认热键被占用，已改用 {chosen}");
+                tray.Balloon(Str.TrayStarted, string.Format(Str.TrayHotkeyChangedTo, chosen));
             else
-                tray.Balloon("呼出热键未生效", result.Message + "；可在设置里改键");
+                tray.Balloon(Str.TrayHotkeyFallback, result.Message + Str.TrayHotkeyHint);
         }
 
         // 把最终生效的键位回写，免得下次启动又去抢一个已被占用的
         if (result.Success && chosen.Display != window.HotkeyPreference)
             window.SetHotkeyPreference(chosen.Display);
 
-        Lifecycle.Autorun.Apply(window.AutorunPreference);
+        // 写不进去就把开关退回关：显示"开"而实际永不自启，是这个功能最坏的一种坏法；
+        // 而且不退回的话，每次启动都会再弹一遍同一个气泡。
+        //
+        // userInitiated 不传 = false：这是**启动时的自动同步**，不是用户动作 ——
+        // 所以 Autorun.Apply 只碰"没有 / 就是本 exe"那一条（防打包副本互相劫持自启，
+        // 2026-10-17 实测过一次：双击临时目录里的副本会把开机自启改指向那份副本）。
+        bool wantAutorun = window.AutorunPreference;
+        if (wantAutorun && !Lifecycle.Autorun.Apply(true))
+        {
+            window.ClearAutorunPreference();
+            tray.Balloon(Str.TrayAutorunFailed,
+                Str.TrayAutorunFailedDetail);
+        }
+        else if (!wantAutorun)
+        {
+            Lifecycle.Autorun.Apply(false);
+        }
 
         _instance.PublishWindowHandle(window.Handle);
 
@@ -238,9 +276,15 @@ public partial class App : Application
             // 只记类型 + 消息定位不到现场（一堆异常消息长得一模一样），所以带上堆栈
             File.AppendAllText(file, line + Environment.NewLine);
         }
-        catch (IOException)
+        catch (Exception)
         {
-            // 日志写不了就算了，不能再因为写日志把进程带崩
+            // 日志写不了就算了，不能再因为写日志把进程带崩。
+            //
+            // 这里必须是 Exception 而不是 IOException：UnauthorizedAccessException
+            // （日志目录不可写、被杀软锁住）同样属于"写不了"，但会穿出这个 catch ——
+            // 而调用方里包含 AppDomain.CurrentDomain.UnhandledException 那条收尾路径，
+            // 在那儿再抛一次，等于把崩溃现场最后一条记录也丢掉。
+            // 注释原先就写着"不能再因为写日志把进程带崩"，但只 catch IOException 没兑现这句话。
         }
     }
 
@@ -303,6 +347,13 @@ public partial class App : Application
     {
         if (_exiting) return;
         _exiting = true;
+
+        // 落盘必须在 Shutdown() **之前**：OnClosing 一看到 IsExiting 就不拦了，窗口真关，
+        // 于是 HidePanel() → OnBeforeHide() 那一整套 FlushSave / FlushNoteSave / SaveNav
+        // 全部被跳过，OnClosed 也不补做。而「面板开着时从托盘点退出」正是唯一的退出入口 ——
+        // 刚敲完备忘（去抖窗口 400ms）或刚挪过窗口就退出，那些改动会静默丢掉。
+        _window?.FlushOnExit();
+
         // 不在这里 Dispose 热键和托盘：统一交给 OnExit，免得释放两次。
         // 也不 _window.Close()——Closing 处理器会把它取消掉，Shutdown() 才是唯一出口。
         Shutdown();
@@ -321,15 +372,33 @@ public partial class App : Application
         // 崩溃不能静默：留一行日志，并让托盘弹出来。
         LogError(e.Exception.ToString());
 
-        _tray?.Balloon("Paperwork 出了个问题", "已记录到 %APPDATA%\\Paperwork\\error.log");
+        // 路径必须实插：数据目录由 AppPaths 一处决定，便携部署下就在 exe 同级的 UserData。
+        // 写死 %APPDATA%\Paperwork 会把用户领到一个空目录里去找日志 —— 而出问题时
+        // 找不到的恰恰是他最需要的那一份。
+        _tray?.Balloon(Str.TrayCrashLogged, string.Format(Str.TrayCrashLoggedTo, Path.Combine(DataDir, "error.log")));
         e.Handled = true;
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        // 兜一道：不是从 ExitApp 进来的退出（比如 X 按钮在关掉「收进托盘」后走 App.Quit
+        // 之外的路径）也要把数据落下去。FlushOnExit 是幂等的，多调一次只是重写同样的内容。
+        _window?.FlushOnExit();
+
         _hotkey?.Dispose();
         _tray?.Dispose();
         _instance.Dispose();
         base.OnExit(e);
+    }
+
+    /// <summary>
+    /// 注销 / 关机。这是唯一一条<b>既不走 <see cref="ExitApp"/>、又不保证来得及走
+    /// <see cref="OnExit"/></b> 的路径 —— Windows 给每个进程的收尾时间窗很短，
+    /// 超了就直接 TerminateProcess。所以在这里就把数据落下去，不指望后面的收尾。
+    /// </summary>
+    protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
+    {
+        _window?.FlushOnExit();
+        base.OnSessionEnding(e);
     }
 }

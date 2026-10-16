@@ -53,30 +53,73 @@ public sealed class StateStore
     {
         _loadProblems.Clear();
 
-        var restored = TryRead(FilePath) ?? TryRead(FilePath + ".bak");
-        if (restored is null)
+        var (main, mainProblems) = TryRead(FilePath);
+        if (main is not null)
         {
-            State = new AppState();
-
-            if (File.Exists(FilePath))
+            State = main;
+            _loadProblems.AddRange(mainProblems);
+        }
+        else
+        {
+            var (bak, bakProblems) = TryRead(FilePath + ".bak");
+            if (bak is not null)
             {
-                // 现场一定要留住。这时候面板是空的，用户随手拖一个文件进来就会
-                // Save() 覆盖掉原文件——那才是真的没法挽回。
+                State = bak;
+                _loadProblems.AddRange(bakProblems);
+
+                // 主文件坏、备份能用：**必须让用户知道，且必须把坏的现场留住**。
+                // 原来这条路是完全静默的 —— 用户毫无感知地回到旧数据，而下一次 Save()
+                // 会把 .bak 也刷成这份旧版本，可能救得回的东西自此消失。
+                // 这一层自己的注释就写着「静默失败是这一层最坏的行为」，那条标准对读也一样。
                 string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
                 Quarantine(FilePath, stamp);
-                Quarantine(FilePath + ".bak", stamp);
-                _loadProblems.Add($"state.json 与备份都无法读取，已按空面板启动。" +
-                                  $"原文件另存为 state.json.corrupt-{stamp}，可以从那里手工救回。");
+                // 走格式串：中英文语序不一样，插值字符串会把语序焊死
+                _loadProblems.Add(string.Format(Str.ErrStateUnreadable, string.Join("；", mainProblems)) +
+                                  Str.ErrUsedBackup +
+                                  string.Format(Str.ErrCorruptKept, stamp));
             }
-            return;
+            else
+            {
+                State = new AppState();
+
+                if (File.Exists(FilePath))
+                {
+                    // 现场一定要留住。这时候面板是空的，用户随手拖一个文件进来就会
+                    // Save() 覆盖掉原文件——那才是真的没法挽回。
+                    string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                    Quarantine(FilePath, stamp);
+                    Quarantine(FilePath + ".bak", stamp);
+                    _loadProblems.Add(string.Format(Str.ErrBothUnreadable, string.Join("；", mainProblems)) +
+                                      string.Format(Str.ErrStartedEmpty, stamp) +
+                                      Str.ErrRecoverHint);
+                }
+
+                EnsureNotNull(State);
+                return;
+            }
         }
 
-        State = restored;
+        EnsureNotNull(State);
         if (State.Version < 2)
         {
             NormalizeRootOrder();
             State.Version = 2;
         }
+    }
+
+    /// <summary>
+    /// 反序列化<b>不保证</b>这些成员非 null：手改的 json 里写一句 <c>"settings": null</c> 就中。
+    /// 而 <c>BoardBuilder.BuildRoot</c> 每次 Render 都读 <c>Settings.ShowGroupBadge</c>、
+    /// 窗口构造函数读 <c>Settings.IconSize</c> —— 一个 null 就是启动即崩，
+    /// 而且崩在 App 那个托盘气泡兜底之前，用户连"数据没读出来"都看不到。
+    /// </summary>
+    private static void EnsureNotNull(AppState s)
+    {
+        s.Groups ??= new List<GroupItem>();
+        s.Entries ??= new List<EntryItem>();
+        s.Notes ??= new List<NoteItem>();
+        s.Nav ??= new List<NavFrame>();
+        s.Settings ??= new AppSettings();
     }
 
     private static void Quarantine(string path, string stamp)
@@ -108,21 +151,59 @@ public sealed class StateStore
             Replace(e with { Sort = next++ });
     }
 
-    private static AppState? TryRead(string path)
+    /// <summary>
+    /// 读一份 state.json。<b>脏记录跳过、不整份否决</b>：丢一条比丢全部好，
+    /// 而且丢了几条要写进 problems 告诉用户 —— 原来一条空路径就让整份文件
+    /// （连设置、备忘、导航一起）被判死并回滚到备份，惩罚和过错完全不成比例。
+    ///
+    /// 返回 null 只表示「这份文件整体读不出来」（不存在 / JSON 语法坏 / 结构对不上），
+    /// 那种情况才轮到备份接手。
+    /// </summary>
+    private static (AppState? State, List<string> Problems) TryRead(string path)
     {
+        var problems = new List<string>();
         try
         {
-            if (!File.Exists(path)) return null;
+            if (!File.Exists(path)) return (null, problems);
+
             var parsed = JsonSerializer.Deserialize<AppState>(File.ReadAllText(path), Json);
-            if (parsed is null) return null;
-            // 结构校验：宁可当作读失败走备份，也不要带着坏数据继续写下去覆盖掉好文件
-            if (parsed.Entries.Any(e => string.IsNullOrWhiteSpace(e.Path))) return null;
-            if (parsed.Groups.Any(g => string.IsNullOrWhiteSpace(g.Title))) return null;
-            return parsed;
+            if (parsed is null)
+            {
+                problems.Add(Str.ErrContentNull);
+                return (null, problems);
+            }
+
+            EnsureNotNull(parsed);
+            string label = Path.GetFileName(path);
+
+            int dropped = 0;
+            dropped += parsed.Entries.RemoveAll(e => string.IsNullOrWhiteSpace(e.Path));
+            dropped += parsed.Groups.RemoveAll(g => string.IsNullOrWhiteSpace(g.Title));
+
+            // 组合被丢掉（或 json 里本来就指向不存在的组合）的条目会变成「谁也看不见」：
+            // GroupId 非空所以不进主界面，组合又没了所以进不去任何组。退回主界面，至少还在眼前。
+            var groupIds = new HashSet<int>(parsed.Groups.Select(g => g.Id));
+            int orphaned = 0;
+            for (int i = 0; i < parsed.Entries.Count; i++)
+            {
+                if (parsed.Entries[i].GroupId is int gid && !groupIds.Contains(gid))
+                {
+                    parsed.Entries[i] = parsed.Entries[i] with { GroupId = null };
+                    orphaned++;
+                }
+            }
+
+            if (dropped > 0)
+                problems.Add(string.Format(Str.ErrSkippedRecords, label, dropped));
+            if (orphaned > 0)
+                problems.Add(string.Format(Str.ErrOrphanEntries, label, orphaned));
+
+            return (parsed, problems);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            return null;
+            problems.Add(string.Format(Str.ErrParseFailed, Path.GetFileName(path), ex.GetType().Name, ex.Message));
+            return (null, problems);
         }
     }
 
@@ -148,7 +229,7 @@ public sealed class StateStore
             // 静默失败是这一层最坏的行为：磁盘满、杀软锁文件、APPDATA 被 OneDrive 同步撞车，
             // 表现都成"我明明加了，重启又没了"。留一行 error.log，并把原因交给面板显示。
             LastSaveFailure = ex.Message;
-            App.LogError($"state.json 落盘失败（{FilePath}）：{ex}");
+            App.LogError(string.Format(Str.ErrSaveFailed, FilePath, ex));
         }
     }
 
@@ -191,10 +272,15 @@ public sealed class StateStore
     /// 新建一条备忘并立即落盘（新建是低频动作，不必去抖）。返回它供调用方继续写。
     /// <b>只在真正敲进第一个字时才被调用</b>（<c>PanelWindow.PushEdit</c>）—— 点「＋」本身不再建，
     /// 否则什么都没写就退出会留下一条空备忘（2026-10-01）。
+    ///
+    /// <paramref name="pinned"/> 是草稿态那个勾选框的值。必须从这里带进来、而不是建完再补一次
+    /// <see cref="SetNotePinned"/>：草稿期间点「置顶」时 <c>_editingNoteId</c> 还是 0，
+    /// 那条路直接 return，勾选框视觉上翻上去了、数据里却永远是 false；
+    /// 而补一次 SetNotePinned 等于同一个动作写两遍盘。
     /// </summary>
-    public NoteItem AddNote()
+    public NoteItem AddNote(bool pinned = false)
     {
-        var note = new NoteItem(NextId(), string.Empty, string.Empty, false, Now());
+        var note = new NoteItem(NextId(), string.Empty, string.Empty, pinned, Now());
         State.Notes.Add(note);
         Touch();
         return note;
@@ -324,12 +410,73 @@ public sealed class StateStore
         Touch();
     }
 
-    /// <summary>设置或清除自定义图标（.ico / .exe 路径）。传 null 表示恢复系统图标。</summary>
+    /// <summary>
+    /// 设置或清除组合磁贴的分类图标（<see cref="Glyphs.Group"/> 的 key）。传 null = 恢复默认的 2×2。
+    ///
+    /// **认不出来的 key 一律不收**：这个值会被写进 state.json，写进去一个没有对应图形的字符串，
+    /// 磁贴会静默落回 2×2（<see cref="Glyphs.Group.Find"/> 返回 null），表现是"点了没反应"。
+    /// 宁可在这里挡住，也别让坏数据落到盘上。
+    /// </summary>
+    public void SetGroupIcon(int id, string? iconKey)
+    {
+        var g = Group(id);
+        if (g is null) return;
+
+        string? key = string.IsNullOrWhiteSpace(iconKey) ? null : iconKey.Trim();
+        if (key is not null && Glyphs.Group.Find(key) is null) return;
+        if (g.Icon == key) return;
+
+        int index = State.Groups.IndexOf(g);
+        State.Groups[index] = g with { Icon = key };
+        Touch();
+    }
+
+    /// <summary>
+    /// 设置或清除自定义图标（.ico / .exe 路径）。传 null 表示"不要自定义这一层"。
+    ///
+    /// **顺手把预设那一层也清掉**：两层并存时预设在上面，于是"挑了图标文件却看不到变化"
+    /// （2026-10-14 定的规矩：最后一次"改图标"说了算，不给"点了没反应"留位置）。
+    /// 反方向不成立 —— 设预设不动自定义，因为「恢复默认图标」要一次剥两层回到磁贴自己的图标。
+    /// </summary>
     public void SetEntryIcon(int id, string? iconPath)
     {
         var e = Entry(id);
-        if (e is null || e.Icon == iconPath) return;
-        Replace(e with { Icon = string.IsNullOrWhiteSpace(iconPath) ? null : iconPath });
+        if (e is null) return;
+        string? path = string.IsNullOrWhiteSpace(iconPath) ? null : iconPath;
+        if (e.Icon == path && (path is not null || e.PresetIcon is null)) return;
+        Replace(e with { Icon = path, PresetIcon = null });
+        Touch();
+    }
+
+    /// <summary>
+    /// 设置或清除条目磁贴的预设图标（<see cref="Glyphs.Group"/> 的 key）。
+    ///
+    /// 与组合那条 <see cref="SetGroupIcon"/> 同一个规矩：**认不出来的 key 一律不收**。
+    /// 只动这一层，自定义图标那一层留着（这样「恢复默认图标」剥掉预设后，露出来的就是"更改前"那张）。
+    /// </summary>
+    public void SetEntryPresetIcon(int id, string? iconKey)
+    {
+        var e = Entry(id);
+        if (e is null) return;
+
+        string? key = string.IsNullOrWhiteSpace(iconKey) ? null : iconKey.Trim();
+        if (key is not null && Glyphs.Group.Find(key) is null) return;
+        if (e.PresetIcon == key) return;
+
+        Replace(e with { PresetIcon = key });
+        Touch();
+    }
+
+    /// <summary>
+    /// 「恢复默认图标」：**一次把预设与自定义两层都清掉**，露出磁贴自己的图标
+    /// （程序 = 真 Shell 图标 / 文件 = 类型线稿 / 文件夹 = 文件夹线稿）。
+    /// 不管当前停在第 2 层还是第 3 层，都回到第 1 层 —— 只做一套逻辑，不设两个菜单项。
+    /// </summary>
+    public void RestoreEntryDefaultIcon(int id)
+    {
+        var e = Entry(id);
+        if (e is null || (e.PresetIcon is null && e.Icon is null)) return;
+        Replace(e with { PresetIcon = null, Icon = null });
         Touch();
     }
 
@@ -421,10 +568,19 @@ public sealed class StateStore
             .OrderBy(e => e.Sort).ThenBy(e => e.Id)
             .ToList();
 
-        // 只接受"这一层 id 的一个完整排列"。数量对不上或缺 id 一律不改，
+        // 只接受"这一层 id 的一个完整排列"。数量对不上、缺 id、有重复 id 一律不改，
         // 免得后台探测/并发写入把条目弄丢。
+        // 重复 id 必须在这里挡：下面 ToDictionary 遇到重复会直接抛 ArgumentException，
+        // 而调用方在鼠标事件里，抛出去就是一次 DispatcherUnhandledException。
         if (entryIdsInOrder.Count != current.Count) return;
-        if (current.Any(w => !entryIdsInOrder.Contains(w.Id))) return;
+        var currentIds = new HashSet<int>(current.Select(w => w.Id));
+        if (currentIds.Count != current.Count) return;          // 存储里就有重复 id，不动
+        var seen = new HashSet<int>();
+        foreach (int id in entryIdsInOrder)
+        {
+            if (!seen.Add(id)) return;
+            if (!currentIds.Contains(id)) return;
+        }
 
         var byId = current.ToDictionary(w => w.Id);
         bool changed = false;
@@ -451,6 +607,18 @@ public sealed class StateStore
         if (idsInOrder.Count != State.Groups.Count + entryCount) return;
         if (idsInOrder.Count == 0) return;
 
+        // 先整体验证、再动手改。原来是边验边改：中途 return 时前面若干条的 Sort
+        // 已经写进内存了，「整个放弃」是假的 —— 留下新旧混排、可能撞号的脏顺序，
+        // 下次任意一次 Save 就把它持久化。
+        var seen = new HashSet<int>();
+        foreach (int id in idsInOrder)
+        {
+            if (!seen.Add(id)) return;                          // 重复 id：不是排列
+            if (State.Groups.Any(g => g.Id == id)) continue;    // 组合
+            var e = Entry(id);
+            if (e is null || e.GroupId != null) return;         // 陌生 id / 组内条目混进来了
+        }
+
         int i = 0;
         bool changed = false;
         foreach (int id in idsInOrder)
@@ -467,8 +635,7 @@ public sealed class StateStore
                 continue;
             }
 
-            var e = Entry(id);
-            if (e is null || e.GroupId != null) return;   // 陌生 id / 组内条目混进来了，整个放弃
+            var e = Entry(id)!;
             if (e.Sort != i)
             {
                 Replace(e with { Sort = i });

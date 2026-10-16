@@ -28,6 +28,11 @@ public sealed class PanScroll : IDisposable
     private readonly ScrollViewer _view;
     private readonly Func<object, bool> _isBlankTarget;
     private readonly DispatcherTimer _inertia;
+    /// <summary>
+    /// 具名持有，<see cref="Dispose"/> 才摘得掉。原来是匿名 lambda，
+    /// 反订阅无从写起 —— ScrollViewer 会永久强引用这个 PanScroll 和它背后的整张对象图。
+    /// </summary>
+    private readonly MouseWheelEventHandler _onWheel;
 
     private Point _start;
     private double _startOffset;
@@ -50,10 +55,12 @@ public sealed class PanScroll : IDisposable
         };
         _inertia.Tick += OnInertiaTick;
 
+        _onWheel = (_, _) => StopInertia();
+
         view.PreviewMouseLeftButtonDown += OnDown;
         view.PreviewMouseMove += OnMove;
         view.PreviewMouseLeftButtonUp += OnUp;
-        view.MouseWheel += (_, _) => StopInertia();
+        view.MouseWheel += _onWheel;
     }
 
     private void OnDown(object sender, MouseButtonEventArgs e)
@@ -102,8 +109,21 @@ public sealed class PanScroll : IDisposable
         if (!_dragging) return;
         _dragging = false;
 
+        // 松手前停顿过就别用旧速度甩：_velocity 只在采样间隔 >12ms 时更新，
+        // 停住半秒再松手，甩出去的是半秒前那一段的速度 —— 观感是"手停了它还自己飞"。
+        double msSinceSample = (Stopwatch.GetTimestamp() - _lastTicks) * 1000.0 / Stopwatch.Frequency;
+        if (msSinceSample > 120) _velocity = 0;
+
         if (_view.IsMouseCaptured && Math.Abs(_velocity) > 0.08)
+        {
             _inertia.Start();
+        }
+        else
+        {
+            // 不启惯性就把捕获还回去。原来这里攥着不放，要等下一次按下或滚轮才松，
+            // 期间悬停提示和别的元素的鼠标行为都被这份捕获搅着。
+            StopInertia();
+        }
     }
 
     private void OnInertiaTick(object? sender, EventArgs e)
@@ -134,5 +154,6 @@ public sealed class PanScroll : IDisposable
         _view.PreviewMouseLeftButtonDown -= OnDown;
         _view.PreviewMouseMove -= OnMove;
         _view.PreviewMouseLeftButtonUp -= OnUp;
+        _view.MouseWheel -= _onWheel;
     }
 }
