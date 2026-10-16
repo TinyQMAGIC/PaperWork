@@ -88,6 +88,29 @@ Drag a tile to reorder. The drop target is told by **ring weight**: 1px = plain 
 
 ---
 
+## 更换预设图标 / Changing preset icons
+
+右键任意磁贴：**组合磁贴**给的是「更改组合预设图标」，**条目磁贴**（程序 / 文件 / 文件夹）给的是「更改磁贴预设图标」——两者打开的是同一个选择页。<br>
+Right-click any tile: a **group tile** offers *Change group preset icon*, an **item tile** (program, file, folder) offers *Change tile preset icon* — both open the same picker.
+
+![更换预设图标](docs/assets/readme/07-preset-icons.svg)
+
+*图 7 · 组合磁贴的右键菜单，以及 60 个预设图标的选择页（7 个分区、每区 8 列）。*<br>
+*Figure 7 · A group tile's context menu and the picker with 60 preset icons.*
+
+- **60 个线稿图标、7 个分区**：游戏娱乐 · 聊天社交 · 创作办公 · 开发智能 · 系统网络 · 文件工具 · 金融生活。同一支笔画的线稿、跟随主题色，换主题不用换图标资产。<br>
+  **60 line-art icons in 7 zones** — games, chat, creating, development, system, files, finance. One pen, following the accent colour, so switching themes never needs new assets.
+- 选中**即生效、面板不关**；状态栏实时显示「共 60 个 · 当前「游戏工具」」，想连试几个不用重开面板。<br>
+  Picking one **applies it immediately and the panel stays open**; the status bar reads *60 total · current "…"*, so you can try a few without reopening.
+- **「恢复默认图标」只在改过之后才出现**（选择页右下角也有入口）：一次把预设图标与自定义图标文件两层一起清掉，回到类型图形 / 真实系统图标。<br>
+  **Restore default icon only appears once you have changed something** (the picker carries the same entry at its bottom right). It clears both layers at once — preset and custom file — back to the type glyph or the real system icon.
+- 组合磁贴因此有两种样子：**没换过 = 2×2 迷你格**（"收纳"的象形），换过之后图形取代它，与文件磁贴同一支笔。<br>
+  A group tile therefore has two looks: **untouched = the 2×2 mini grid**, and once you pick an icon the glyph replaces it, drawn with the same pen as file tiles.
+- 组合的菜单里**没有**「打开文件位置 / 资源管理器菜单」——那两项只对带真实路径的条目出现。<br>
+  A group's menu has **no** *Open file location* / *File Explorer menu* — those only appear for items backed by a real path.
+
+---
+
 ## 备忘录 / Notes
 
 标题栏那枚折角纸图标打开，是**独立覆盖层**：不进导航栈，重启也不会停在备忘页。<br>
@@ -184,6 +207,55 @@ Icons form **three layers**, each covering the one below:
 
 ---
 
+## 安装与运行 / Install and run
+
+| 产物 / Artifact | 大小 / Size | 需要什么 / Needs |
+|---|---|---|
+| `Paperwork-CN-0.1.0.exe`（中文界面）<br>Chinese UI build | ≈ 66 MB | 双击即用，自带 .NET 运行时<br>double-click, .NET runtime included |
+| `Paperwork-EN-0.1.0.exe`（英文界面）<br>English UI build | ≈ 66 MB | 同上<br>same as above |
+| `Paperwork-v0.1.0-portable.zip` | ≈ 230 KB | 解压后 4 个文件（约 0.6 MB），需要 **.NET 10 桌面运行时**<br>4 files (~0.6 MB) after unzipping; needs the **.NET 10 Desktop Runtime** |
+
+推荐使用`.exe`程序，这样不需要单独下载.net10桌面运行时<br>
+I recommend using the `.exe` build — that way you don't need to download the .NET 10 Desktop Runtime.
+
+- 仅 x64，Windows 10 / 11。<br>
+**x64** only, Windows 10 / 11.
+
+ .NET 10 桌面运行时可以访问微软官网或下述官方链接下载：<br>
+The .NET 10 Desktop Runtime can be downloaded from the Microsoft official website or via the official link below:
+
+https://dotnet.microsoft.com/en-us/download/dotnet
+
+- 中英是**两套编译产物**（界面文案是编译期常量，不是运行时切换）——想要另一种界面就换那个 exe。<br>
+  Chinese and English are **two separate builds** (UI strings are compile-time constants, not a runtime switch) — pick the exe you want.
+  
+- ⚠️ **不要用管理员身份运行**。Windows 的 UIPI 会阻断资源管理器向提权进程拖放文件，而"把文件拖进来"是它的核心功能；程序检测到自己被提权时会弹托盘气泡提醒你。<br>
+  ⚠️ **Do not run it as administrator.** Windows UIPI blocks drag-and-drop from Explorer into an elevated process, which breaks the core feature. Paperwork notices elevation and warns you via a tray balloon.
+  
+- 从托盘右键「退出」才是真的退出；卸载就是删掉 exe（和你想留就留的 `UserData\`）。<br>
+  Only *Exit* in the tray menu really quits. Uninstalling means deleting the exe (and the `UserData\` folder, if you want it gone).
+
+---
+
+## 交互速查 / Cheat sheet
+
+| 操作 / Action | 结果 / Result |
+|---|---|
+| `Alt+Space` | 呼出 / 收起面板<br>show / hide the panel |
+| 拖动磁贴<br>drag a tile | 排序 · 并入组合 · 新建组合<br>reorder · merge into a group · create a group |
+| 双击磁贴<br>double-click a tile | 打开文件，或进入文件夹<br>open the file, or enter the folder |
+| 单击组合磁贴<br>click a group tile | 进入组合<br>enter the group |
+| 在空白处单击<br>click blank space | 返回上一层（根层则取消选中）<br>back one level (deselect at the root) |
+| `Esc` | 清搜索词 → 返回上一层 → 收起面板<br>clear query → back → hide |
+| `Backspace` | 返回上一层<br>back one level |
+| 点面包屑任意一段<br>click a breadcrumb segment | 直接跳回那一层<br>jump straight to that level |
+| 右键磁贴<br>right-click a tile | 纸张化菜单，含资源管理器原生菜单<br>paper menu, including the native Explorer menu |
+| 滚轮 / 按住空白上下拖<br>wheel / drag blank vertically | 滚动（后者带惯性）<br>scroll (the latter has inertia) |
+| 拖到面板外松手<br>release outside the panel | 取消这次拖拽<br>cancel the drag |
+| `✕` | 收进托盘（默认）<br>hide to tray (default) |
+
+---
+
 ## 使用小贴士 / Tips
 
 - **默认热键是 `Alt+Space`**（可在设置里改）。热键被别的程序占用时会自动退让到候选键位，并在托盘气泡里告诉你换成了哪个。<br>
@@ -212,55 +284,8 @@ Icons form **three layers**, each covering the one below:
   **✕** hides to the tray rather than quitting (`Alt+F4` too); use *Exit* in the tray menu to really quit. That default can be turned off in Settings.
 - 首次启动时，「行为」那四项默认全部打开：**跟随系统启动**、**点 ✕ 收托盘**、**组合角标**、**全屏应用时自动收起**（游戏、视频全屏时让位）。四项都能在设置里关掉。<br>
   On first run all four Behaviour switches start on: **start with Windows**, **✕ hides to tray**, **group badge**, and **auto-hide when an app goes full screen**. All four can be turned off in Settings.
-
----
-
-## 交互速查 / Cheat sheet
-
-| 操作 / Action | 结果 / Result |
-|---|---|
-| `Alt+Space` | 呼出 / 收起面板<br>show / hide the panel |
-| 拖动磁贴<br>drag a tile | 排序 · 并入组合 · 新建组合<br>reorder · merge into a group · create a group |
-| 双击磁贴<br>double-click a tile | 打开文件，或进入文件夹<br>open the file, or enter the folder |
-| 单击组合磁贴<br>click a group tile | 进入组合<br>enter the group |
-| 在空白处单击<br>click blank space | 返回上一层（根层则取消选中）<br>back one level (deselect at the root) |
-| `Esc` | 清搜索词 → 返回上一层 → 收起面板<br>clear query → back → hide |
-| `Backspace` | 返回上一层<br>back one level |
-| 点面包屑任意一段<br>click a breadcrumb segment | 直接跳回那一层<br>jump straight to that level |
-| 右键磁贴<br>right-click a tile | 纸张化菜单，含资源管理器原生菜单<br>paper menu, including the native Explorer menu |
-| 滚轮 / 按住空白上下拖<br>wheel / drag blank vertically | 滚动（后者带惯性）<br>scroll (the latter has inertia) |
-| 拖到面板外松手<br>release outside the panel | 取消这次拖拽<br>cancel the drag |
-| `✕` | 收进托盘（默认）<br>hide to tray (default) |
-
----
-
-## 安装与运行 / Install and run
-
-| 产物 / Artifact | 大小 / Size | 需要什么 / Needs |
-|---|---|---|
-| `Paperwork-CN-0.1.0.exe`（中文界面）<br>Chinese UI build | ≈ 66 MB | 双击即用，自带 .NET 运行时<br>double-click, .NET runtime included |
-| `Paperwork-EN-0.1.0.exe`（英文界面）<br>English UI build | ≈ 66 MB | 同上<br>same as above |
-| `Paperwork-v0.1.0-portable.zip` | ≈ 230 KB | 解压后 4 个文件（约 0.6 MB），需要 **.NET 10 桌面运行时**<br>4 files (~0.6 MB) after unzipping; needs the **.NET 10 Desktop Runtime** |
-
-推荐使用`.exe`程序，这样不需要单独下载.net10桌面运行时<br>
-I recommend using the `.exe` build — that way you don't need to download the .NET 10 Desktop Runtime.
-
-- 仅 x64，Windows 10 / 11。<br>
-**x64** only, Windows 10 / 11.
-
- .NET 10 桌面运行时可以访问微软官网或下述官方链接下载：<br>
-The .NET 10 Desktop Runtime can be downloaded from the Microsoft official website or via the official link below:
-
-https://dotnet.microsoft.com/en-us/download/dotnet
-
-- 中英是**两套编译产物**（界面文案是编译期常量，不是运行时切换）——想要另一种界面就换那个 exe。<br>
-  Chinese and English are **two separate builds** (UI strings are compile-time constants, not a runtime switch) — pick the exe you want.
-  
-- ⚠️ **不要用管理员身份运行**。Windows 的 UIPI 会阻断资源管理器向提权进程拖放文件，而"把文件拖进来"是它的核心功能；程序检测到自己被提权时会弹托盘气泡提醒你。<br>
-  ⚠️ **Do not run it as administrator.** Windows UIPI blocks drag-and-drop from Explorer into an elevated process, which breaks the core feature. Paperwork notices elevation and warns you via a tray balloon.
-  
-- 从托盘右键「退出」才是真的退出；卸载就是删掉 exe（和你想留就留的 `UserData\`）。<br>
-  Only *Exit* in the tray menu really quits. Uninstalling means deleting the exe (and the `UserData\` folder, if you want it gone).
+- 想给组合换张脸（或给条目换个线稿），右键磁贴就有入口——见上面的「更换预设图标」。<br>
+  To give a group (or an item) a different face, the right-click menu has the entry — see *Changing preset icons* above.
 
 ---
 
