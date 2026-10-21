@@ -276,9 +276,6 @@ public partial class PanelWindow
         if (key is null) _store.RestoreEntryDefaultIcon(eid);
         else _store.SetEntryPresetIcon(eid, key);
         Render(animate: false);
-        // 剥掉预设之后，程序 / 快捷方式那一类的 WantsShellIcon 从 false 变回 true，
-        // 真图标得重新排一次队才取得回来 —— 少了这句就一直停在类型线稿上，直到下次重绘。
-        ScheduleIcons();
         RefreshPicker();
     }
 

@@ -47,6 +47,15 @@ public sealed class StateStore
     /// </summary>
     public string? LastSaveFailure { get; private set; }
 
+    /// <summary>
+    /// 内存里的 <see cref="State.Nav"/> 比磁盘新。导航时的 <see cref="SetNavInMemory"/>
+    /// 只更新内存不写盘，等 300ms 去抖（或收起/退出）再落盘。
+    ///
+    /// <b>为什么必须当场更新内存</b>：<see cref="Save"/> 序列化的是整个 State。导航后如果只改
+    /// <c>_nav</c>，用户接着改个名/写条备忘触发 Save，磁盘里那份 nav 还是旧的。
+    /// </summary>
+    public bool NavDirty { get; private set; }
+
     // ------------------------------------------------------------------ 读写
 
     public void Load()
@@ -221,6 +230,7 @@ public sealed class StateStore
                 File.Move(tmp, FilePath);
 
             LastSaveFailure = null;
+            NavDirty = false;   // 这一份已经包含当下的 State.Nav，不需要再去抖补写
         }
         catch (Exception ex)
         {
@@ -647,19 +657,39 @@ public sealed class StateStore
         if (changed) Touch();
     }
 
+    /// <summary>
+    /// 导航路径上的轻量更新：只改内存里的 <see cref="State.Nav"/>，<b>不碰磁盘、不查目录</b>。
+    /// 持久化交给 <see cref="PersistNavIfDirty"/> 的去抖调用或收起/退出时的 <see cref="SaveNav"/>。
+    ///
+    /// 这里只剪掉已经不存在的组合（一次字典遍历）；文件夹的存在性检查是 IO，
+    /// 对掉线网络共享能阻塞数秒，留到 <see cref="SaveNav"/> 的收起/退出路径再做。
+    /// </summary>
+    public void SetNavInMemory(IReadOnlyList<NavFrame> frames)
+    {
+        var valid = frames.Where(f => f.Kind != NavKind.Group || Group(f.Id) is not null).ToList();
+        if (valid.Count == 0) valid.Add(NavFrame.Root);
+        if (SameNav(valid, State.Nav)) return;
+
+        // 必须拷贝：NavStack.Frames 是内部 List 的只读视图，直接存引用会在下次 Push/Pop 时被改掉。
+        State.Nav = valid;
+        NavDirty = true;
+    }
+
+    /// <summary>UI 线程的 300ms 去抖到点后调用。没有变更就不写；写失败保留脏标记，收起/退出会再试。</summary>
+    public void PersistNavIfDirty()
+    {
+        if (!NavDirty) return;
+        Save();
+    }
+
     public void SaveNav(IReadOnlyList<NavFrame> frames)
     {
-        // 先看有没有变，变了才去查文件系统。<b>这个顺序是刻意的</b>：
-        // 下面那句 LINQ 里含 Directory.Exists，对掉线的网络共享和拔掉的 U 盘能阻塞数秒
-        // （见 SafeIsDirectory 的注释）。而 SaveNav 的调用点里有 Render()，也就是
-        // 每次热键呼出——把查询放在比较之前，等于每次呼出都在 UI 线程上做一次网络 IO。
-        //
-        // 代价：只有当导航栈真的变了，才会顺便把已经失效的帧裁掉。停在同一个文件夹上时，
-        // 那个文件夹即使被删了，这条已落盘的帧也留着。可接受——文件夹层现在是后台异步加载的
-        // （见 BoardBuilder.LoadingFolder），落在失效目录上只会显示「无法读取该文件夹」，不再卡界面。
-        if (SameNav(frames, State.Nav)) return;
+        // 没变更、也没有待写的导航时直接走，避免收起/退出在 UI 线程上做一次目录 IO。
+        // （导航路径已经改成 SetNavInMemory，不再每次 Render 都走这里。）
+        if (!NavDirty && SameNav(frames, State.Nav)) return;
 
-        // 只存还存在的帧，避免重启后跳进一个已被删掉的组合
+        // 只存还存在的帧，避免重启后跳进一个已被删掉的组合/文件夹。
+        // 目录检查只留在这个低频入口，见方法开头的说明。
         var valid = frames.Where(f => f.Kind switch
         {
             NavKind.Root => true,
@@ -669,12 +699,14 @@ public sealed class StateStore
 
         if (valid.Count == 0) valid.Add(NavFrame.Root);
 
-        // 导航没变就别动盘：Render() 每次呼出都走到这里，而写盘 = 整个 state.json 序列化
-        // + 原子写三份文件，纯属白跑，还会在 UI 线程上做目录存在性检查。
-        if (SameNav(valid, State.Nav)) return;
+        if (!SameNav(valid, State.Nav))
+        {
+            State.Nav = valid;
+            NavDirty = true;
+        }
 
-        State.Nav = valid;
-        Save();
+        // 即使内存里的 nav 已经是最新的（SetNavInMemory 先改过），只要还脏就得落一次盘。
+        if (NavDirty) Save();
     }
 
     private static bool SameNav(IReadOnlyList<NavFrame> a, IReadOnlyList<NavFrame> b)

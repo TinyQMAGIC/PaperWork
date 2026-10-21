@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -28,7 +29,15 @@ namespace Paperwork.Shell;
 public partial class PanelWindow : Window
 {
     private const int SaveDebounceMs = 400;
+    /// <summary>导航落盘的去抖。只改 state.json 里的 nav，不阻塞动画首帧。</summary>
+    private const int NavSaveDebounceMs = 300;
     private static readonly TimeSpan ViewAnim = TimeSpan.FromMilliseconds(160);
+
+    /// <summary>换层动画方向。返回根层用略大→正常的收束，和进层的略小→正常区分。</summary>
+    private enum ViewTransition { Forward, Back }
+
+    /// <summary>返回根层入场的第一帧缩放；1.06 = 106%，再缩回 100%，与前进的 0.94 对称。</summary>
+    private const double BackStartScale = 1.06;
 
     public static readonly DependencyProperty IconSizeProperty =
         DependencyProperty.Register(nameof(IconSize), typeof(double), typeof(PanelWindow),
@@ -98,6 +107,10 @@ public partial class PanelWindow : Window
     private readonly StateStore _store = new();
     private readonly NavStack _nav = new();
     private DispatcherTimer? _saveTimer;
+    private DispatcherTimer? _navSaveTimer;
+    private readonly HashSet<string> _launching = new(StringComparer.OrdinalIgnoreCase);
+    private bool _lastClickDidAct;
+    private int _lastClickNavVersion;
     private HwndSource? _source;
     private uint _taskbarRestartMsg;
     private IconPump? _icons;
@@ -129,13 +142,23 @@ public partial class PanelWindow : Window
     private Board _board = BoardBuilder.Build(new StateStore(), NavFrame.Root);
 
     /// <summary>
-    /// 界面上真正绑着的那一份磁贴列表。
-    /// 用 <see cref="ObservableCollection{T}"/> 而不是每次换 <c>ItemsSource</c>：
-    /// 换实例会让 WPF 整体重置容器，实测之后 UIA 就再也读不到磁贴了
-    /// （屏幕阅读器和我们的自动化验证是同一类受害者），而且图标容器也白重建一遍。
-    /// 拖拽排序要的就是 <c>Move</c> 这一条精确通知。
+    /// 根页缓存（A1）：根页和当前子页各一份集合/ItemsControl，但共用同一个 Scroller。
+    /// 页面上真正绑着的活动集合是 <see cref="_shown"/>；根/子切换只换引用和 PageHost 的子元素，
+    /// 不重建根页的容器。只保留这两个页面，不按导航层级/组合数复制。
     /// </summary>
-    private readonly ObservableCollection<TileVm> _shown = new();
+    private readonly ObservableCollection<TileVm> _childShown = new();
+    private readonly ObservableCollection<TileVm> _rootShown = new();
+    private ObservableCollection<TileVm> _shown;
+
+    private Board? _rootBoard;
+    private Board? _childBoard;
+    private string? _rootSignature;
+    private bool _rootActive;
+    private double _rootScrollOffset;
+    private double _childScrollOffset;
+    private NavFrame? _lastRenderedNav;
+
+    private ItemsControl ActiveTiles => _rootActive ? RootTiles : Tiles;
 
     private string _query = string.Empty;
 
@@ -187,6 +210,7 @@ public partial class PanelWindow : Window
     {
         if (Handle == IntPtr.Zero) return;   // 探针模式 / 窗口没建起来，没什么可落盘的
 
+        _navSaveTimer?.Stop();
         FlushNoteSave();
         _store.SaveNav(_nav.Frames);
         FlushSave();
@@ -224,7 +248,9 @@ public partial class PanelWindow : Window
         RestoreNav();
         _icons = new IconPump(Dispatcher);
 
-        Tiles.ItemsSource = _shown;
+        _shown = _childShown;
+        Tiles.ItemsSource = _childShown;
+        RootTiles.ItemsSource = _rootShown;
         _pan = new PanScroll(Scroller, source => TileFrom(source) is null);
 
         _watcher = new FolderWatcher(Dispatcher);
@@ -253,6 +279,7 @@ public partial class PanelWindow : Window
         // 松手那一下永远收不到）与面板失去激活。语义与 Esc 一致 = 取消并还原，见 AbortDrag。
         // 第三道在 OnBeforeHide → DropDragState。
         Tiles.LostMouseCapture += OnDragCaptureLost;
+        RootTiles.LostMouseCapture += OnDragCaptureLost;
         Deactivated += OnPanelDeactivated;
 
         // 用户挪动 / 拉伸窗口 → 去抖落盘几何。
@@ -292,7 +319,6 @@ public partial class PanelWindow : Window
         // 不这么做的话"外面改了名、面板还显示旧名"会一直持续到缓存被 LRU 挤掉为止。
         _icons?.InvalidateUnder(_watcher?.WatchedPath ?? string.Empty);
         Render(animate: false);
-        ScheduleIcons();
         Status(Str.StatusFolderUpdated);
     }
 
@@ -325,6 +351,10 @@ public partial class PanelWindow : Window
         // 但每次退出都在 error.log 里留一串毫无意义的异常，容易把真问题淹没掉。
         IsPanelVisible = false;
 
+        _navSaveTimer?.Stop();
+        Tiles.LostMouseCapture -= OnDragCaptureLost;
+        RootTiles.LostMouseCapture -= OnDragCaptureLost;
+        ClearPages();
         _watcher?.Dispose();
         _pan?.Dispose();
         _icons?.Dispose();
@@ -431,6 +461,36 @@ public partial class PanelWindow : Window
 
         Hide();
         IsPanelVisible = false;
+
+        // 面板已经不可见，才拆页面：先拆会让收起瞬间出现一块空白。
+        // 根页缓存只在“这一轮显示期间”有意义，收起时连根页容器一起释放；
+        // 下次呼出 Render 会重建。只保留一个根页 + 一个子页，不按导航次数累积。
+        ClearPages();
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: false, compacting: true);
+    }
+
+    /// <summary>
+    /// 释放两页的容器/集合与板对象。必须在窗口已经隐藏之后调用，避免用户看到空白。
+    /// 滚动位置保留在字段里，下次 Show 的 ShowPage 会尝试恢复（内容变短时 WPF 自动夹取）。
+    /// </summary>
+    private void ClearPages()
+    {
+        if (_rootActive) _rootScrollOffset = Scroller.VerticalOffset;
+        else _childScrollOffset = Scroller.VerticalOffset;
+
+        // 先把 ItemsControl 从视觉树摘掉，再清集合：PageHost 里同时挂两个会重影，
+        // 而清集合会拆容器；两件事都发生在窗口隐藏之后。
+        PageHost.Children.Clear();
+        _rootShown.Clear();
+        _childShown.Clear();
+
+        _rootBoard = null;
+        _childBoard = null;
+        _rootSignature = null;
+        _lastRenderedNav = null;
+        _rootActive = false;
+        _shown = _childShown;
+        _board = BoardBuilder.Build(new StateStore(), NavFrame.Root);
     }
 
     /// <summary>
@@ -488,19 +548,13 @@ public partial class PanelWindow : Window
         _icons?.Trim();
         _watcher?.Stop();
         _saveTimer?.Stop();
+        _navSaveTimer?.Stop();
         FlushSave();
 
         // 备忘是去抖落盘的（400ms）。收面板 / 退出时计时器可能还没到点，
         // 不强制写一次的话，最后敲的那几个字就丢了。
         FlushNoteSave();
         _store.SaveNav(_nav.Frames);
-
-        // 收完之后主动要一次 GC。面板收起后就没有任何分配压力了，GC 不会自己来，
-        // 那些已经断掉引用的位图会在私有内存里继续挂几十分钟甚至到下次呼出。
-        // 这和 D19 排除的 SetProcessWorkingSetSizeEx 不是一回事：那个只是把页面换出去
-        // 给任务管理器看数字，这里是真的先断了可达性再回收。用 blocking:false 收尾，
-        // 不卡 UI 线程。
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: false, compacting: true);
     }
 
     /// <summary>
@@ -517,7 +571,13 @@ public partial class PanelWindow : Window
     /// </summary>
     private void ReleaseTileIcons()
     {
-        foreach (var tile in _board.Tiles)
+        // 根页缓存和子页都可能持有位图；只清 _board.Tiles 会漏掉另一个页面，
+        // 隐藏期的 Trim 就变成白裁。
+        foreach (var tile in _rootShown)
+        {
+            if (tile.Icon is not null) tile.Icon = null;
+        }
+        foreach (var tile in _childShown)
         {
             if (tile.Icon is not null) tile.Icon = null;
         }
@@ -528,7 +588,6 @@ public partial class PanelWindow : Window
     {
         Native.RaiseWithinTopmost(Handle);
         Render(animate: false);
-        ScheduleIcons();
 
         // 上次落盘失败过，就在眼前这条最显眼的位置补一句。必须放在 Render 之后——
         // 状态栏会被 Render 里的 ApplyQuery 覆盖掉。
@@ -623,22 +682,162 @@ public partial class PanelWindow : Window
 
     // ------------------------------------------------------------ 渲染
 
-    private void Render(bool animate)
+    private void Render(bool animate, ViewTransition transition = ViewTransition.Forward)
     {
-        _board = BoardBuilder.Build(_store, _nav.Current);
-        BuildBreadcrumb();
-        ApplyQuery(animate);
-        _store.SaveNav(_nav.Frames);
+        bool root = _nav.Current.Kind == NavKind.Root;
+        bool layerChanged = _lastRenderedNav != _nav.Current;
+        _lastRenderedNav = _nav.Current;
+
+        if (root)
+        {
+            // 根页只有在内容/视觉设置真的变了时才重建；正常的“组→主界面”直接复用容器。
+            if (!RootPageIsCurrent()) BuildRootPage();
+            ShowPage(root: true);
+            BuildBreadcrumb();
+            UpdateChrome();
+        }
+        else
+        {
+            _childBoard = BoardBuilder.Build(_store, _nav.Current);
+            _board = _childBoard;
+            _shown = _childShown;
+            if (layerChanged) _childScrollOffset = 0;
+
+            // 子页仍然按原逻辑重建/重铺；根页保留在 RootTiles 里不被碰。
+            ApplyQuery();
+            ShowPage(root: false);
+            BuildBreadcrumb();
+        }
+
+        // 导航只更新内存，不写盘；300ms 去抖后由 PersistNavIfDirty 落盘。
+        // 这样换层的首帧不再被 state.json 序列化 + File.Replace 顶住。
+        _store.SetNavInMemory(_nav.Frames);
 
         // 只盯当前展开的这一个文件夹；回到上层或退出文件夹时自动停掉
         _watcher?.Watch(_board.FolderPath);
 
         // 每次渲染都重建磁贴对象，图标和 Shell 显示名是异步填到新对象上的。
         // 这里漏掉的话，返回上一层就会出现"图标和名字全退回占位状态"。
+        // 缓存命中的图标会在这一句同步写回，必须排在 UpdateLayout 之前。
         ScheduleIcons();
+
+        if (animate) PlayViewAnimationAfterLayout(transition);
+
+        if (_store.NavDirty) ScheduleNavSave();
 
         // 文件夹层此刻只是个空壳，真内容交给后台
         if (_board.Kind == NavKind.Folder) BeginFolderLoad();
+    }
+
+    /// <summary>
+    /// 根页是否需要重建。签名只包含根层可见数据与视觉设置，不含 nav、窗口位置、备忘。
+    /// 改名/排序/图标/角标/档位/主题任何一项变了都会不匹配；返回时先重建再显示，
+    /// 宁可慢一次也不显示旧根页。
+    /// </summary>
+    private bool RootPageIsCurrent() =>
+        _rootBoard is not null &&
+        string.Equals(_rootSignature, ComputeRootSignature(), StringComparison.Ordinal);
+
+    private void BuildRootPage()
+    {
+        _rootBoard = BoardBuilder.Build(_store, NavFrame.Root);
+        _rootShown.Clear();
+        foreach (var tile in _rootBoard.Tiles) _rootShown.Add(tile);
+        _rootSignature = ComputeRootSignature();
+    }
+
+    /// <summary>
+    /// 根层可见数据的轻量签名。没有它，缓存的根页在改名/排序/换图标后会显示旧样子。
+    /// 只在这里做 O(组合 + 条目) 的字符串拼装；72 条数据量级可忽略。
+    /// </summary>
+    private string ComputeRootSignature()
+    {
+        var s = _store.State.Settings;
+        var sb = new StringBuilder(4096);
+        sb.Append(s.Accent).Append('\u001f').Append(s.Paper).Append('\u001f')
+          .Append(s.IconSize).Append('\u001f').Append(s.ShowGroupBadge).Append('\u001f');
+
+        foreach (var g in _store.Groups())
+        {
+            sb.Append('G').Append('\u001f').Append(g.Id).Append('\u001f')
+              .Append(g.Sort).Append('\u001f').Append(g.Title).Append('\u001f')
+              .Append(g.Icon ?? string.Empty).Append('\u001f')
+              .Append(_store.EntriesIn(g.Id).Count()).Append('\u001f');
+        }
+
+        foreach (var e in _store.EntriesIn(null))
+        {
+            sb.Append('E').Append('\u001f').Append(e.Id).Append('\u001f')
+              .Append(e.Sort).Append('\u001f').Append(e.Path).Append('\u001f')
+              .Append(e.Label ?? string.Empty).Append('\u001f')
+              .Append(e.IsDir ? '1' : '0').Append('\u001f')
+              .Append(e.Icon ?? string.Empty).Append('\u001f')
+              .Append(e.PresetIcon ?? string.Empty).Append('\u001f');
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// 在同一个 ScrollViewer 里切换根页/子页：从 PageHost.Children 里摘下不用的那个，
+    /// 只把活动的挂回去。被摘下的 ItemsControl 对象仍持有自己的容器，重新挂回时不用
+    /// 重新生成；它不在视觉树上，UIA 也不会看到一份隐藏的根页磁贴。
+    /// </summary>
+    private void ShowPage(bool root)
+    {
+        if (_rootActive) _rootScrollOffset = Scroller.VerticalOffset;
+        else _childScrollOffset = Scroller.VerticalOffset;
+
+        // A1 的根页缓存会连 TileVm.Selected 一起留下；返回根层时清掉“点进组/文件夹”的那一块。
+        if (root && !_rootActive)
+            foreach (var t in _rootShown) t.Selected = false;
+
+        var active = root ? (UIElement)RootTiles : Tiles;
+        var inactive = root ? (UIElement)Tiles : RootTiles;
+        if (PageHost.Children.Contains(inactive)) PageHost.Children.Remove(inactive);
+        if (!PageHost.Children.Contains(active)) PageHost.Children.Add(active);
+
+        _rootActive = root;
+        _shown = root ? _rootShown : _childShown;
+        _board = root ? _rootBoard! : _childBoard!;
+
+        // 页面刚换过内容/父级，先把新页布局出来，再把该页自己的滚动位置放回去。
+        Scroller.UpdateLayout();
+        Scroller.ScrollToVerticalOffset(root ? _rootScrollOffset : _childScrollOffset);
+    }
+
+    /// <summary>
+    /// 先把新树布局出来，再启动动画。
+    ///
+    /// 不能直接把 <see cref="PlayViewAnimation"/> 延后到 Rendering 回调：布局没跑、或者第一帧
+    /// 用的是基值（Opacity=1 / Scale=1）时，会先闪一帧全不透明，再跳到 0.35/0.94 淡入。
+    /// <c>UpdateLayout</c> 只做布局、不渲染，所以第一帧就是动画的起始值。
+    /// 代价是布局成本仍然同步吃在点击到动画之间——要消掉它得靠复用容器/视觉树，不在这一轮。
+    /// </summary>
+    private void PlayViewAnimationAfterLayout(ViewTransition transition)
+    {
+        if (!IsPanelVisible) return;
+
+        Scroller.UpdateLayout();
+        PlayViewAnimation(transition);
+    }
+
+    private void ScheduleNavSave()
+    {
+        _navSaveTimer ??= CreateNavSaveTimer();
+        _navSaveTimer.Stop();
+        _navSaveTimer.Start();
+    }
+
+    private DispatcherTimer CreateNavSaveTimer()
+    {
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(NavSaveDebounceMs) };
+        t.Tick += (_, _) =>
+        {
+            t.Stop();
+            _store.PersistNavIfDirty();
+        };
+        return t;
     }
 
     /// <summary>
@@ -680,8 +879,10 @@ public partial class PanelWindow : Window
                 // 已经不在请求的那一帧了，这份结果是过期的
                 if (_nav.Current != requested) return;
 
+                _childBoard = board;
                 _board = board;
-                ApplyQuery(animate: false);
+                _shown = _childShown;
+                ApplyQuery();
                 ScheduleIcons();
             }));
         });
@@ -745,7 +946,7 @@ public partial class PanelWindow : Window
                 btn.IsEnabled = frames.Count > 1;
             }
 
-            btn.Click += (_, _) => { _nav.PopTo(index); Render(animate: true); };
+            btn.Click += (_, _) => { _nav.PopTo(index); Render(animate: true, ViewTransition.Back); };
             pieces.Add(btn);
         }
 
@@ -762,7 +963,7 @@ public partial class PanelWindow : Window
         Foreground = (Brush)FindResource("Ink3")
     };
 
-    private void ApplyQuery(bool animate = true)
+    private void ApplyQuery()
     {
         // 全局搜索上线后这里不再按查询过滤磁贴：搜索结果归 SearchPanel 那层管。
         // 两套过滤并存的话，清空搜索框时会出现"磁贴回来了、状态栏还是搜索口径"这种
@@ -772,9 +973,14 @@ public partial class PanelWindow : Window
         _shown.Clear();
         foreach (var t in list) _shown.Add(t);
 
-        EmptyHint.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateChrome();
+    }
 
-        if (list.Count == 0)
+    private void UpdateChrome()
+    {
+        EmptyHint.Visibility = _shown.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        if (_shown.Count == 0)
         {
             // 文件夹层此刻可能只有空壳（内容还在后台枚举）。这时候再说"把任意文件拖进来"
             // 是在骗人——用户会以为这是个空目录，然后把自己拖进去的文件当成丢了。
@@ -791,11 +997,9 @@ public partial class PanelWindow : Window
         // 搜索层背景是 Transparent（要透出右下角那两道斜线），主状态栏必须自己让位，
         // 否则"N 项 · M 个组合"和"0 项 · Esc 返回"两行字叠在左下角（实测重叠过）。
         StatusText.Visibility = _searching ? Visibility.Collapsed : Visibility.Visible;
-
-        if (animate) PlayViewAnimation();
     }
 
-    private void PlayViewAnimation()
+    private void PlayViewAnimation(ViewTransition transition)
     {
         if (Scroller.RenderTransform is not ScaleTransform scale)
         {
@@ -808,7 +1012,9 @@ public partial class PanelWindow : Window
         // FillBehavior.Stop：播完就把属性交还给基值（1.0，与动画终值相同，观感无跳变）。
         // 默认的 HoldEnd 会让完成的时钟**永久持有**这两个属性 —— 之后任何对 Scroller.Opacity
         // 的直接赋值都会被动画静默压掉，而且每次换层都多挂一个不释放的时钟。
-        var anim = new DoubleAnimation(0.94, 1.0, ViewAnim)
+        // 返回根层把起始缩放改成略大→正常；淡入浓度与前进相同，先只观察 Scale 的差异。
+        double fromScale = transition == ViewTransition.Back ? BackStartScale : 0.94;
+        var anim = new DoubleAnimation(fromScale, 1.0, ViewAnim)
         {
             EasingFunction = ease,
             FillBehavior = FillBehavior.Stop
@@ -860,6 +1066,11 @@ public partial class PanelWindow : Window
 
     private void OnMouseUp(object sender, MouseButtonEventArgs e)
     {
+        // 记录"这一下之前"的层与动作状态，供第二下 MouseDoubleClick 判断。
+        // 必须记在 Activate/返回之前：组合是单击进层，第二下打过来时栈已经变了。
+        _lastClickNavVersion = _nav.Version;
+        _lastClickDidAct = false;
+
         // Esc 取消拖拽后的那次抬手，不算点击
         if (_suppressClick)
         {
@@ -917,8 +1128,9 @@ public partial class PanelWindow : Window
                 }
                 else
                 {
+                    _lastClickDidAct = true;
                     _nav.Pop();
-                    Render(animate: true);
+                    Render(animate: true, ViewTransition.Back);
                 }
             }
             return;
@@ -942,7 +1154,11 @@ public partial class PanelWindow : Window
         // 拿一条空路径去 ShellOps.Open。实际很难点到，但不该靠"难点到"活着。
         if (tile.Kind == TileKind.Ghost) { e.Handled = true; return; }
 
-        if (!tile.NeedsDoubleClick) Activate(tile);
+        if (!tile.NeedsDoubleClick)
+        {
+            _lastClickDidAct = true;
+            Activate(tile);
+        }
         e.Handled = true;
     }
 
@@ -973,6 +1189,10 @@ public partial class PanelWindow : Window
     {
         if (_searching) return;
 
+        // 第一下已经执行过动作（组合进层 / 点空白返回），或者已经换了层：
+        // 第二下不能再按"光标下现在这枚磁贴"执行——那可能已经是新层里的一个 exe。
+        if (_lastClickDidAct || _lastClickNavVersion != _nav.Version) return;
+
         var tile = TileFrom(e.OriginalSource);
         if (tile is null) return;
 
@@ -999,12 +1219,14 @@ public partial class PanelWindow : Window
                 {
                     InvalidateDragForLayer();   // 换层 = 拖拽上下文作废（见那个方法的注释）
                     Render(animate: true);
-                    ScheduleIcons();
                 }
                 break;
 
             case TileKind.Folder:
-                if (!StateStore.SafeIsDirectory(tile.Path))
+                // 不再在 UI 线程同步查 Directory.Exists：对掉线网络共享/U 盘能冻数秒。
+                // 已知是文件夹就直接进；真读不到时由 BeginFolderLoad 在后台失败并显示错误层，
+                // 比"整块面板失去响应"好。空路径是另一回事，先明确挡掉。
+                if (string.IsNullOrWhiteSpace(tile.Path))
                 {
                     Status(Str.StatusFolderUnreachable);
                     break;
@@ -1017,7 +1239,7 @@ public partial class PanelWindow : Window
                 // 和本层的「在资源管理器中打开」收尾格（TileKind.More）走的是同一条路。
                 if (_nav.AtMaxDepth)
                 {
-                    ShellOps.OpenInExplorer(tile.Path, select: null);
+                    OpenInExplorerAsync(tile.Path, select: null);
                     break;
                 }
 
@@ -1030,19 +1252,79 @@ public partial class PanelWindow : Window
                 {
                     InvalidateDragForLayer();   // 换层 = 拖拽上下文作废（见那个方法的注释）
                     Render(animate: true);
-                    ScheduleIcons();
                 }
                 break;
 
             case TileKind.More:
-                ShellOps.OpenInExplorer(tile.Path, select: null);
+                OpenInExplorerAsync(tile.Path, select: null);
                 break;
 
             default:
                 if (tile.IsDead) Status(Str.StatusDeadPath);
-                else if (!ShellOps.Open(tile.Path, elevated: false, out string err)) Status(err);
+                else LaunchAsync(tile.Path, elevated: false, Status);
                 break;
         }
+    }
+
+    /// <summary>
+    /// 把 Shell 启动挪出 UI 线程。ShellExecuteEx 会等火绒/UAC/SmartScreen/已运行的启动器，
+    /// 放在 UI 线程上就是整块面板冻住；这里只负责发起，慢多久都不影响面板。
+    ///
+    /// 保留 <c>UseShellExecute=true</c>：安全提示、文件关联、提权语义都是它带来的，不能为了快绕开。
+    /// 同一路径同一动作在途时忽略重复点击（UAC 卡住时连点不会排队开一堆）。
+    /// </summary>
+    private void LaunchAsync(string path, bool elevated, Action<string> onError)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            onError(Str.StatusDeadPath);
+            return;
+        }
+
+        string key = (elevated ? "runas|" : "open|") + path;
+        if (!_launching.Add(key)) return;
+
+        _ = Task.Run(() =>
+        {
+            string? error = null;
+            try
+            {
+                if (!ShellOps.Open(path, elevated, out string openError)) error = openError;
+            }
+            catch (Exception ex)
+            {
+                // ShellOps.Open 自己已经兜了异常；这一层只防以后改动把异常漏出 Task。
+                error = string.Format(Str.StatusOpenFailed, ex.Message);
+            }
+
+            if (Dispatcher.HasShutdownStarted) return;
+
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _launching.Remove(key);
+                if (!string.IsNullOrEmpty(error)) onError(error);
+            }), DispatcherPriority.Background);
+        });
+    }
+
+    /// <summary>资源管理器启动同样不该占 UI 线程；没有返回值，失败保持原来的静默语义。</summary>
+    private void OpenInExplorerAsync(string? folder, string? select)
+    {
+        if (string.IsNullOrWhiteSpace(folder) && string.IsNullOrWhiteSpace(select)) return;
+
+        string key = "explorer|" + (folder ?? string.Empty) + "|" + (select ?? string.Empty);
+        if (!_launching.Add(key)) return;
+
+        _ = Task.Run(() =>
+        {
+            try { ShellOps.OpenInExplorer(folder, select); }
+            catch (Exception ex) { App.LogError(ex.ToString()); }
+
+            if (Dispatcher.HasShutdownStarted) return;
+
+            _ = Dispatcher.BeginInvoke(new Action(() => _launching.Remove(key)),
+                                       DispatcherPriority.Background);
+        });
     }
 
     private void OnKeyDown(object sender, KeyEventArgs e)
@@ -1071,7 +1353,7 @@ public partial class PanelWindow : Window
         if (e.Key == Key.Escape)
         {
             if (_query.Length > 0) { SearchBox.Clear(); }
-            else if (_nav.Frames.Count > 1) { _nav.Pop(); Render(animate: true); }
+            else if (_nav.Frames.Count > 1) { _nav.Pop(); Render(animate: true, ViewTransition.Back); }
             else HidePanel();
             e.Handled = true;
             return;
@@ -1089,7 +1371,7 @@ public partial class PanelWindow : Window
         if (e.Key == Key.Back && _nav.Frames.Count > 1)
         {
             _nav.Pop();
-            Render(animate: true);
+            Render(animate: true, ViewTransition.Back);
             e.Handled = true;
         }
     }
@@ -1204,7 +1486,6 @@ public partial class PanelWindow : Window
 
         int added = _store.AddPaths(paths, _board.GroupId);
         Render(animate: false);
-        ScheduleIcons();
         Status(added == 0 ? Str.StatusAlreadyThere : string.Format(Str.StatusAdded, added));
     }
 
@@ -1252,14 +1533,12 @@ public partial class PanelWindow : Window
         if (tile.Kind is TileKind.Group or TileKind.Folder)
             menu.Items.Add(MenuItem(Str.MenuOpen, () => Activate(tile)));
         else if (tile.Kind == TileKind.More)
-            menu.Items.Add(MenuItem(Str.BoardOpenInExplorer, () => ShellOps.OpenInExplorer(tile.Path, null)));
+            menu.Items.Add(MenuItem(Str.BoardOpenInExplorer, () => OpenInExplorerAsync(tile.Path, null)));
         else
         {
             menu.Items.Add(MenuItem(Str.MenuOpen, () => Activate(tile)));
             menu.Items.Add(MenuItem(Str.MenuRunAsAdmin, () =>
-            {
-                if (!ShellOps.Open(tile.Path, elevated: true, out string err)) Status(err);
-            }));
+                LaunchAsync(tile.Path, elevated: true, Status)));
         }
 
         // 组合是面板自造的概念，磁盘上没有对应物：给它弹"打开文件位置"会把 explorer
@@ -1267,7 +1546,7 @@ public partial class PanelWindow : Window
         if (tile.Kind != TileKind.Group && !string.IsNullOrWhiteSpace(tile.Path))
         {
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem(Str.MenuOpenFileLocation, () => ShellOps.OpenInExplorer(null, tile.Path)));
+            menu.Items.Add(MenuItem(Str.MenuOpenFileLocation, () => OpenInExplorerAsync(null, tile.Path)));
             menu.Items.Add(MenuItem(Str.MenuExplorerMenu, () => ShowNativeMenu(tile)));
         }
 
@@ -1293,7 +1572,6 @@ public partial class PanelWindow : Window
                 {
                     _store.RestoreEntryDefaultIcon(eid);
                     Render(animate: false);
-                    ScheduleIcons();       // 剥掉预设后程序类要重新去解真图标
                     Status(Str.StatusDefaultRestored);
                 }));
             menu.Items.Add(MenuItem(Str.MenuChangeIcon, () => ChangeIcon(eid)));
@@ -1526,7 +1804,6 @@ public partial class PanelWindow : Window
 
         _store.SetEntryIcon(id, dlg.FileName);
         Render(animate: false);
-        ScheduleIcons();
         Status(Str.StatusIconChanged);
     }
 

@@ -179,7 +179,7 @@ public partial class PanelWindow
         // 按下点只要落在磁贴上就先记下来，**不管这块能不能拖**。
         // 组合磁贴是典型：它不能当拖拽源，但"按住拖一下"也不该退化成"点进去了"。
         _pressOnTile = hit is not null;
-        if (hit is not null) _dragStart = e.GetPosition(Tiles);
+        if (hit is not null) _dragStart = e.GetPosition(ActiveTiles);
 
         if (!LayerIsSortable) return;
 
@@ -197,7 +197,7 @@ public partial class PanelWindow
     {
         if (e.LeftButton != MouseButtonState.Pressed) return;
 
-        var now = e.GetPosition(Tiles);
+        var now = e.GetPosition(ActiveTiles);
 
         // 按在磁贴上拖过了阈值 → 这次抬手不算点击。
         // 没有这一条的话，拖一下组合栏就会钻进那个组合，而用户以为自己只是"拎了一下"。
@@ -211,7 +211,7 @@ public partial class PanelWindow
 
             _dragActive = true;
             _dragTile.Dragging = true;
-            Tiles.CaptureMouse();
+            ActiveTiles.CaptureMouse();
             Ghost().ShowFor(_dragTile, IconSize);   // 里面会自己贴一次光标
         }
 
@@ -373,12 +373,12 @@ public partial class PanelWindow
     /// 但只走到 <see cref="RubberBandRatio"/> 处 —— 留一部分跟着光标。
     /// 解除时由 <c>Follow()</c> 当场打断插值、直接贴光标（跟手优先）。
     /// </summary>
-    private void GlideGhostTo(TileVm target, Point cursorInTiles)
+    private void GlideGhostTo(TileVm target, Point cursorInActiveTiles)
     {
         if (TileBounds(target) is not { } b) return;
 
-        var center = Tiles.PointToScreen(CircleCenter(b));
-        var cursor = Tiles.PointToScreen(cursorInTiles);
+        var center = ActiveTiles.PointToScreen(CircleCenter(b));
+        var cursor = ActiveTiles.PointToScreen(cursorInActiveTiles);
 
         double ax = center.X + (cursor.X - center.X) * RubberBandRatio;
         double ay = center.Y + (cursor.Y - center.Y) * RubberBandRatio;
@@ -395,7 +395,7 @@ public partial class PanelWindow
         _ghost?.GlideTo((int)Math.Round(ax), (int)Math.Round(ay));
     }
 
-    /// <summary>判定圆的圆心（<c>Tiles</c> 坐标系）：横向正中、纵向 0.4 高 —— 与判定共用一处。</summary>
+    /// <summary>判定圆的圆心（<c>ActiveTiles</c> 坐标系）：横向正中、纵向 0.4 高 —— 与判定共用一处。</summary>
     private static Point CircleCenter(Rect bounds) =>
         new(bounds.X + bounds.Width / 2, bounds.Y + bounds.Height * 0.4);
 
@@ -446,7 +446,12 @@ public partial class PanelWindow
 
             // 视图已经是最终顺序，把 _board 跟着换掉就够；再调 Render 会白白重建一遍磁贴。
             // 过滤掉占位格——它是拖放期间临时塞进 _shown 的，不该进 _board.Tiles
-            _board = _board with { Tiles = _shown.Where(t => !t.IsGhostTile).ToList() };
+            var ordered = _shown.Where(t => !t.IsGhostTile).ToList();
+            _board = _board with { Tiles = ordered };
+            // A1：根页缓存也持有自己的 Board；同步顺序并刷新签名，否则进组再返回
+            // 会因为签名不匹配白重建一次，正好丢掉刚排好的缓存。
+            _rootBoard = _rootBoard is null ? _board : _rootBoard with { Tiles = ordered };
+            _rootSignature = ComputeRootSignature();
         }
         else
         {
@@ -755,13 +760,13 @@ public partial class PanelWindow
         }
     }
 
-    private TileVm? TileAt(Point inTiles) =>
-        Tiles.InputHitTest(inTiles) is DependencyObject hit ? TileFrom(hit) : null;
+    private TileVm? TileAt(Point inActiveTiles) =>
+        ActiveTiles.InputHitTest(inActiveTiles) is DependencyObject hit ? TileFrom(hit) : null;
 
     /// <summary>
     /// 光标是否还在<b>可落点区域</b>里 —— 出界就意味着"拖到面板外面松手 = 取消"。
     ///
-    /// 2026-10-01 从 <c>Tiles</c> 的矩形改成 <c>Scroller</c>（滚动区）的矩形。
+    /// 2026-10-01 从 <c>ActiveTiles</c> 的矩形改成 <c>Scroller</c>（滚动区）的矩形。
     /// 两者之间还夹着 ScrollViewer 的 <c>Margin(12,10,6,0)</c> 与 <c>Padding(0,0,4,0)</c>，
     /// 外加"磁贴不满一屏时下方那片空白"—— 这些地带原来一律算"出界"，
     /// 于是想往最左/最右划出去时，稍微一偏就被切成取消。
@@ -776,15 +781,15 @@ public partial class PanelWindow
         return p.X >= 0 && p.Y >= 0 && p.X <= Scroller.ActualWidth && p.Y <= Scroller.ActualHeight;
     }
 
-    /// <summary>磁贴在 <c>Tiles</c> 坐标系里的矩形；容器还没实现布局就返回 null。</summary>
+    /// <summary>磁贴在 <c>ActiveTiles</c> 坐标系里的矩形；容器还没实现布局就返回 null。</summary>
     private Rect? TileBounds(TileVm tile)
     {
-        if (Tiles.ItemContainerGenerator.ContainerFromItem(tile) is not FrameworkElement fe) return null;
+        if (ActiveTiles.ItemContainerGenerator.ContainerFromItem(tile) is not FrameworkElement fe) return null;
         if (fe.ActualWidth <= 0 || fe.ActualHeight <= 0) return null;
 
         try
         {
-            return new Rect(fe.TransformToAncestor(Tiles).Transform(new Point(0, 0)),
+            return new Rect(fe.TransformToAncestor(ActiveTiles).Transform(new Point(0, 0)),
                             new Size(fe.ActualWidth, fe.ActualHeight));
         }
         catch (InvalidOperationException)
@@ -797,7 +802,7 @@ public partial class PanelWindow
     private Rect? TileScreenBounds(TileVm tile)
     {
         if (TileBounds(tile) is not { } b) return null;
-        return new Rect(Tiles.PointToScreen(b.TopLeft), Tiles.PointToScreen(b.BottomRight));
+        return new Rect(ActiveTiles.PointToScreen(b.TopLeft), ActiveTiles.PointToScreen(b.BottomRight));
     }
 
     private bool PastDragThreshold(Point now) =>
@@ -885,7 +890,7 @@ public partial class PanelWindow
         // 在 ReorderUp 还没读 _shown 落盘之前就把顺序还原回去，表现成"拖了但永远回到旧布局"
         // （2026-10-12 用户实报的回归，正是漏了这道闸）。
         _tearingDownDrag = true;
-        if (Tiles.IsMouseCaptured) Tiles.ReleaseMouseCapture();
+        if (ActiveTiles.IsMouseCaptured) ActiveTiles.ReleaseMouseCapture();
         _tearingDownDrag = false;
 
         _ghost?.HideGhost();

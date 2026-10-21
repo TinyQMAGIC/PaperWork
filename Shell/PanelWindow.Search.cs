@@ -251,7 +251,7 @@ public partial class PanelWindow
         Scroller.Visibility = Visibility.Visible;
 
         // 磁贴与状态栏恢复原样（EmptyHint 的可见性也在里面算）
-        ApplyQuery(animate: false);
+        ApplyQuery();
         BuildBreadcrumb();
     }
 
@@ -408,9 +408,7 @@ public partial class PanelWindow
         if (hit.Kind == SearchHitKind.Entry && !hit.IsDir && hit.Path is string p)
         {
             menu.Items.Add(MenuItem(Str.MenuRunAsAdmin, () =>
-            {
-                if (!ShellOps.Open(p, elevated: true, out string err)) Status(err);
-            }));
+                LaunchAsync(p, elevated: true, Status)));
         }
 
         menu.Items.Add(MenuItem(Str.MenuOpenTileLocation, () => RevealTile(hit)));
@@ -418,7 +416,7 @@ public partial class PanelWindow
         if (hit.Kind == SearchHitKind.Entry && !string.IsNullOrWhiteSpace(hit.Path))
         {
             menu.Items.Add(Sep());
-            menu.Items.Add(MenuItem(Str.MenuOpenFileLocation, () => ShellOps.OpenInExplorer(null, hit.Path!)));
+            menu.Items.Add(MenuItem(Str.MenuOpenFileLocation, () => OpenInExplorerAsync(null, hit.Path!)));
             menu.Items.Add(MenuItem(Str.MenuExplorerMenu, () => ShowNativeMenu(hit.Path!)));
         }
 
@@ -457,7 +455,6 @@ public partial class PanelWindow
         }
 
         Render(animate: true);
-        ScheduleIcons();
         SelectTileAfterReveal(entryId);
     }
 
@@ -492,7 +489,6 @@ public partial class PanelWindow
                     SearchBox.Clear();
                     ExitSearch();
                     Render(animate: true);
-                    ScheduleIcons();
                 }
                 else Say(Str.StatusAtDeepest);
                 break;
@@ -500,10 +496,11 @@ public partial class PanelWindow
             case SearchHitKind.Entry when hit.Path is string p:
                 if (hit.IsDir)
                 {
-                    // 文件夹磁贴：和首页点它一样是钻进去；到栈底了交给资源管理器
-                    if (!StateStore.SafeIsDirectory(p)) { Say(Str.StatusFolderUnreachable); break; }
+                    // 文件夹磁贴：和首页点它一样是钻进去；到栈底了交给资源管理器。
+                    // 与首页 Activate 同一个口径：不在 UI 线程同步查目录，读不到由后台加载层报错。
+                    if (string.IsNullOrWhiteSpace(p)) { Say(Str.StatusFolderUnreachable); break; }
 
-                    if (_nav.AtMaxDepth) { ShellOps.OpenInExplorer(p, select: null); break; }
+                    if (_nav.AtMaxDepth) { OpenInExplorerAsync(p, select: null); break; }
 
                     // 与首页 Activate 那条同一个口径：盘符根用 GetFileName 会给空串
                     // （GetFileName(@"C:\") == ""），原来这里靠自己 TrimEnd + 回落兜、
@@ -519,7 +516,6 @@ public partial class PanelWindow
                         SearchBox.Clear();
                         ExitSearch();
                         Render(animate: true);
-                        ScheduleIcons();
                     }
                     break;
                 }
@@ -527,7 +523,7 @@ public partial class PanelWindow
                 // 文件 / 程序：直接按路径打开，不绕"先切到那一层再点一下"——
                 // 结果条目可能在别的组合里，绕过去等于搜索白做。
                 // 结果列表**故意不关**：连着打开好几个东西时不用重新搜一遍。
-                if (!ShellOps.Open(p, elevated: false, out string err)) Say(err);
+                LaunchAsync(p, elevated: false, Say);
                 break;
 
             case SearchHitKind.Note when hit.NoteId is int nid:

@@ -918,15 +918,30 @@
       <ScrollViewer x:Name="Scroller" Grid.Row="3" Margin="12,10,6,0"
                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                     Focusable="False" Padding="0,0,4,0">
-        <!-- Control.VerticalContentAlignment 默认是 Center，不显式设 Top 会让不满一屏的磁贴整块居中 -->
-        <ItemsControl x:Name="Tiles" Focusable="False"
-                      VerticalAlignment="Top" VerticalContentAlignment="Top">
-          <ItemsControl.ItemsPanel>
-            <ItemsPanelTemplate>
-              <shell:TilePanel IconSize="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"/>
-            </ItemsPanelTemplate>
-          </ItemsControl.ItemsPanel>
-        </ItemsControl>
+        <!--
+          根页缓存（2026-10-21 A1）：根页与当前子页各一个 ItemsControl，但共用同一个 Scroller/PanScroll。
+          PageHost 同一时间只挂**一个**子元素：根/组切换时把不用的那个摘下来，视觉树和容器仍保存在
+          ItemsControl 对象里；这样根页返回不重建，也不会在 UIA 里多出一份隐藏磁贴。
+          两个都显式 Top：Control.VerticalContentAlignment 默认 Center 会把不满一屏的磁贴整块居中。
+        -->
+        <Grid x:Name="PageHost" VerticalAlignment="Top">
+          <ItemsControl x:Name="RootTiles" Focusable="False"
+                        VerticalAlignment="Top" VerticalContentAlignment="Top">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <shell:TilePanel IconSize="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"/>
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+          </ItemsControl>
+          <ItemsControl x:Name="Tiles" Focusable="False"
+                        VerticalAlignment="Top" VerticalContentAlignment="Top">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <shell:TilePanel IconSize="{Binding IconSize, RelativeSource={RelativeSource AncestorType=Window}}"/>
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+          </ItemsControl>
+        </Grid>
       </ScrollViewer>
 
       <Border x:Name="EmptyHint" Grid.Row="3" Margin="16,10,16,8" Visibility="Collapsed">

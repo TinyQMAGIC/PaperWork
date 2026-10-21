@@ -30,6 +30,12 @@ public sealed class NavStack
 
     public IReadOnlyList<NavFrame> Frames => _frames;
 
+    /// <summary>
+    /// 栈内容真的变过一次就 +1。只给双击守卫用：判断"第一下单击之后有没有换层"。
+    /// 不用 Render 次数，是因为目录监视器、改名、换主题也会 Render，那些不该吞掉正常双击。
+    /// </summary>
+    public int Version { get; private set; }
+
     public NavFrame Current => _frames[^1];
 
     public bool IsRoot => _frames.Count == 1;
@@ -64,14 +70,16 @@ public sealed class NavStack
         // 同一帧重复进入没有意义，会把栈拉长成 主界面 → A → A
         if (_frames[^1] == frame) return false;
         _frames.Add(frame);
+        Version++;
         return true;
     }
 
-    /// <summary>弹一帧。点四周空白、Esc、Alt+←、返回按钮走的都是这里。</summary>
+    /// <summary>弹一帧。点四周空白、Esc、Backspace、返回按钮走的都是这里。</summary>
     public bool Pop()
     {
         if (_frames.Count <= 1) return false;
         _frames.RemoveAt(_frames.Count - 1);
+        Version++;
         return true;
     }
 
@@ -79,13 +87,17 @@ public sealed class NavStack
     public void PopTo(int index)
     {
         if (index < 0 || index >= _frames.Count) return;
-        _frames.RemoveRange(index + 1, _frames.Count - index - 1);
+        int remove = _frames.Count - index - 1;
+        if (remove <= 0) return;
+        _frames.RemoveRange(index + 1, remove);
+        Version++;
     }
 
     public void Reset()
     {
         _frames.Clear();
         _frames.Add(NavFrame.Root);
+        Version++;
     }
 
     public void ReplaceWith(IReadOnlyList<NavFrame> frames)
@@ -94,6 +106,7 @@ public sealed class NavStack
         _frames.AddRange(frames);
         if (_frames.Count == 0) _frames.Add(NavFrame.Root);
         while (_frames.Count > MaxFrames) _frames.RemoveAt(_frames.Count - 1);
+        Version++;
     }
 }
 
