@@ -1,7 +1,10 @@
 # Paperwork
 
 **热键呼出的 Windows 收纳浮窗 —— 把快捷方式、文件、文件夹和备忘收进一块纸感面板。**<br>
-A hotkey-summoned stash panel for Windows — keep shortcuts, files, folders and notes on one paper-feel panel.
+**A hotkey-summoned stash panel for Windows — keep shortcuts, files, folders and notes on one paper-feel panel.**
+
+让你的桌面更加清爽，使电脑文件更加易于管理<br>
+Make your desktop cleaner and your computer files easier to manage.
 
 `Alt+Space` 一按，面板出现在鼠标所在的位置；把任何文件拖进来，它就留在这里，下次一按还在。<br>
 Press `Alt+Space` and the panel appears where your mouse is. Drop any file in, and it stays there for next time.
