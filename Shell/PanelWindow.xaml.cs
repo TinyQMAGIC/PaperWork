@@ -1985,17 +1985,28 @@ internal static class ShellOps
     {
         try
         {
-            // Windows 的文件名允许含半角引号。把路径拼进命令行的话，一个名字里带引号的
-            // 目录会让 explorer.exe 收到额外的参数（参数注入）——路径本身来自拖放和
-            // state.json，属于半可信输入。
-            //
-            // 改走 ArgumentList：由框架负责转义，整个 "/select,<路径>" 仍然作为**一个**
-            // 参数投递给 explorer，所以 /select, 那套语义完全不变。
-            string arg = select is not null ? "/select," + select : folder ?? string.Empty;
-            if (arg.Length == 0) return;
-
             var psi = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
-            psi.ArgumentList.Add(arg);
+
+            if (!string.IsNullOrWhiteSpace(select))
+            {
+                // /select, 的语法是「逗号后紧跟带引号的路径」：
+                //     explorer.exe /select,"D:\Games\Epic Games\..."
+                // 不能把这整段塞进 ArgumentList：路径含空格时框架会把**整段**包成
+                //     "/select,D:\Games\Epic Games\..."
+                // Explorer 认不出这个开关，就退回默认目录（本机表现为打开“文档”）。
+                //
+                // 这里是唯一需要手工拼引号的地方：路径来自拖放和 state.json，属于半可信输入，
+                // 先拒绝半角引号，免得拼出额外参数。Windows 文件名本身不允许 "，正常拖入的路径不会命中。
+                if (select.Contains('"')) return;
+                psi.Arguments = "/select,\"" + select + "\"";
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(folder)) return;
+                // 单一路径参数没有 /select, 的语法约束，继续交给 ArgumentList 转义。
+                psi.ArgumentList.Add(folder);
+            }
+
             Process.Start(psi)?.Dispose();   // 同 Open：只发起、不持有句柄
         }
         catch (Exception) { /* explorer 拒绝就什么也不做，别弹错误框 */ }
